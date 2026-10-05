@@ -16,9 +16,10 @@
 	You can also paste the key into PRESET_KEYS below.
 ]]
 
-local PRESET_KEYS = { Groq = "", Gemini = "", OpenRouter = "" } -- optional
-local CAP_CHAT, CAP_TRIGGER, CAP_SMART = 1000, 500, 2000
+local PRESET_KEYS = { "", "", "", "" } -- optional: paste up to 4 API keys here (you can also use the Keys tab)
+local CAP_CHAT, CAP_TRIGGER, CAP_SMART, CAP_ASK, CAP_WORLD = 6000, 5500, 7000, 2000, 99999999
 local DIR = "SofiAI"
+local VERSION = "3.0"
 
 local Players = game:GetService("Players")
 local HttpService = game:GetService("HttpService")
@@ -59,12 +60,13 @@ local function baseCleanup()
 		end)
 	end
 end
-G.SofiAI = { Cleanup = baseCleanup, Version = "2.0" }
+G.SofiAI = { Cleanup = baseCleanup, Version = "3.0" }
 
 ------------------------------------------------------------------ executor helpers
 local httprequest = (syn and syn.request) or (http and http.request) or http_request or (fluxus and fluxus.request) or request
 local hasFS = type(writefile) == "function" and type(readfile) == "function" and type(isfile) == "function"
 local getAsset = getcustomasset or getsynasset
+local Frozen = false
 
 ------------------------------------------------------------------ text utils
 local function trim(s)
@@ -236,11 +238,13 @@ local function ensureDir(path)
 	end
 end
 
-local function readJson(name, default)
-	if not hasFS then
-		return default
-	end
-	local path = DIR .. "/" .. name
+local USER_FILES = { "config.json", "knowledge.json", "triggers.json", "personalities.json" }
+local IS_USER = {}
+for _, n in ipairs(USER_FILES) do
+	IS_USER[n] = true
+end
+
+local function readRaw(path)
 	local ok, raw = pcall(function()
 		if isfile(path) then
 			return readfile(path)
@@ -248,16 +252,45 @@ local function readJson(name, default)
 		return nil
 	end)
 	if ok and type(raw) == "string" and raw ~= "" then
+		return raw
+	end
+	return nil
+end
+
+local function readJson(name, default)
+	if not hasFS then
+		return default
+	end
+	local path = DIR .. "/" .. name
+	local raw = readRaw(path)
+	if raw then
 		local d = jdecode(raw)
 		if type(d) == "table" then
 			return d
+		end
+		pcall(function() -- keep unreadable data instead of silently losing it
+			ensureDir(DIR)
+			ensureDir(DIR .. "/backup")
+			writefile(DIR .. "/backup/unreadable-" .. (name:gsub("[/%.]", "_")) .. "-" .. tostring(os.time()) .. ".txt", raw)
+		end)
+	end
+	if IS_USER[name] then
+		local braw = readRaw(path .. ".bak")
+		if braw then
+			local d = jdecode(braw)
+			if type(d) == "table" then
+				if not Frozen then
+					pcall(writefile, path, braw) -- heal the damaged main file from its spare copy
+				end
+				return d
+			end
 		end
 	end
 	return default
 end
 
 local function writeJson(name, data)
-	if not hasFS then
+	if not hasFS or Frozen then
 		return false
 	end
 	ensureDir(DIR)
@@ -266,7 +299,55 @@ local function writeJson(name, data)
 		return false
 	end
 	local ok = pcall(writefile, DIR .. "/" .. name, enc)
+	if ok and IS_USER[name] then
+		pcall(writefile, DIR .. "/" .. name .. ".bak", enc) -- second copy in case a write is cut short
+	end
 	return ok
+end
+
+-- first run of a new script version: copy the user's data aside, so updating can never lose it
+local function snapshotOnUpdate()
+	local meta = readJson("meta.json", {})
+	if meta.version == VERSION or not hasFS then
+		return meta
+	end
+	local dir = DIR .. "/backup/before-" .. VERSION
+	ensureDir(DIR)
+	ensureDir(DIR .. "/backup")
+	ensureDir(dir)
+	local n = 0
+	for _, f in ipairs(USER_FILES) do
+		local raw = readRaw(DIR .. "/" .. f)
+		if raw and not readRaw(dir .. "/" .. f) then
+			if pcall(writefile, dir .. "/" .. f, raw) then
+				n = n + 1
+			end
+		end
+	end
+	meta.prev, meta.version, meta.snapshot, meta.at, meta.files = meta.version, VERSION, "before-" .. VERSION, os.time(), n
+	writeJson("meta.json", meta)
+	return meta
+end
+local Meta = snapshotOnUpdate()
+
+local function restoreSnapshot()
+	if not hasFS or type(Meta.snapshot) ~= "string" then
+		return false, "No backup yet"
+	end
+	local dir = DIR .. "/backup/" .. Meta.snapshot
+	local n = 0
+	for _, f in ipairs(USER_FILES) do
+		local raw = readRaw(dir .. "/" .. f)
+		if raw and pcall(writefile, DIR .. "/" .. f, raw) then
+			pcall(writefile, DIR .. "/" .. f .. ".bak", raw)
+			n = n + 1
+		end
+	end
+	if n == 0 then
+		return false, "No backup files found"
+	end
+	Frozen = true
+	return true, "Restored " .. n .. " files. Closing, run the script again to load them."
 end
 
 ------------------------------------------------------------------ icons (real PNG icons, embedded)
@@ -275,6 +356,11 @@ local ICON_DATA = {
 	chatgpt = "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",
 	bot = "iVBORw0KGgoAAAANSUhEUgAAAGAAAABgCAYAAADimHc4AAADdElEQVR42u2cz2tcVRTHP0fJQtSJVVGECCnFoAtdiIFiti4KLjokS3GZRUEqFnTnQjf9G7rIStrdWKgWN1laKLiSLkIHNWJQUWnqJIEWGvp1MW9hyDDv5c37NW++n+2Dy73f7z333nMmJ2CMMcYYY4wxxhhjTIlIWpLUk7SnydlLxlqystnF31Xx7NqEbAb0VB69adMjajBgAHRKGn4vIuanyYAnWhZgnWmbcB0GbPogrvcIWgJuA6dKWVBEOALGC9QHzgJfA/uOgOl7RckRYGyADTA2wAYYG2ADTHPyAEmvAueB94HTwALw9JRrNAB+A/pJ8ng9Ih40LTlakLQh6VDtZyDpM0lzjYgASV3gK+CZGTs97gCrEfFTbXeApI+B3gyKD/Am8L2kt2uJgGTn93yRcw9YjojtygyQtABszejOH8UPwLsRcVjVEfSFxT/CMrBeSQQkT81t4EnrfoS/gcXSn6iSPsrwVNuS1JX07LSrKukFSZ9IOsiw7tUqJvRdBvGfa9v2lrQi6WHK2q9WMZG7KZPotvWMkfR5ytp/rGISaX9O2GmxAa+krP3fKi7hVv0mW/f6XQ2tGRtgA2yAsQE2wNgAG1Dn2/r/PWOF93yVPX7licg4coqzW1bPV9HjF73+JhjQK7Pnq+jxi15/7aWIlJ6xiXu+ih6/klLEuD7eEoKqk/NbU8ZPi5Cxd06MEp8JWohyRECpxb0SIjbvJrwPnE06hMZGwGVK6t+acU4l2qZGwER9vI6AsRy7c5yINTARcx9veWz6Em76Jew+3sLZT7Q8Jr4TsaYmYnWfiwXfR2WPXy0uxrWsGDei9NHocnTrinHTeAK07Q5wImZsgA0wNsAGGBtgAzIwSHknv9ziHCCtbrRfhQE7Kd/XW7xh30v5/kcVu+BaSjb+QNJKC3f/85L6KWv/toqJrGVo1zyQdEnSiy0QvpOsuZ9h3RdOOn6eWtBTwK/AS75Cj3DIsFH791LvgKQT/EvrfYyNk4qfKwKSKJgDbjH8Hwlm+DJ8IyL+rCQPiIhHwBrwj7XnMfBhHvEnSsQiYgc4B/w14+JfjIhvcutYwCvhDMNf/d+awWPng4i4WWspIiJ+Bt4BPk3Lklv02rkCvD6p+IVEwIgnahdYBV4DFoH5KRf8IMn+fwFuAjfyvHaMMcYYY4wxxhhjjPkPa8gJn4BbImcAAAAASUVORK5CYII=",
 	zap = "iVBORw0KGgoAAAANSUhEUgAAAGAAAABgCAYAAADimHc4AAAABmJLR0QA/wD/AP+gvaeTAAAEs0lEQVR4nO2dS49URRSAmwEdjBI3g6CJkJi4MTHGvQZ/AJEFCQMO4lYkxLAyPtYaWZII0RULEIZBhg1xrxCTCRuUxI1gBoaVj42Rh8B8LqpaO6S7T9W9Vaequ8+XzK7rPL473Z25depOp2MYhmEYYwSwHngHWARuAg/9zw3gG2AvMF26zrEEeAu4hcwKsKt0vWMDMAUcCxD/KF8AU6XrH2m8/OMN5P93EUr3MLIkkN9ltnQvI0dC+eC+oO2LOZTE8rvMle5rJMgkH+BM6d6qp4H8BWAG2AicF157rXR/VdNA/jywrmf9ZuH1d0v2VzVt5fsYm+wCNCCFfB9nv7Dueon+qiaVfB/re2GtfQn3klj+VmBVWL9Pu8dqaSB/YZB8H+9DYf0d4GnNHqsltXwf80chxrxWf1WTSf5LAXF2aPVYLTnk+7ifCXH+ZNLvA2WUvwb4VYj1lUaP1ZJLvo/9ekC8NzK3WC855fv4R4V4t4C1OXusFgX5jwG/CTEP5+yxWnLL9zm2B8R9NVeP1aIh3+c5KcT9OUd/VaMo/0ngLyH2Jzl6rBYt+T7XXED8F1P3WC2a8n2+C0L8H1L2VzUF5M8A/wg5DqbssVq05fuc7wk57gObUvVYLSXk+7wXhTzfpuivagrK38Kkb7w0kD9wJ6tBbmnj5TawIUWuKikp3+dfisgdwwPc+OI54G1gfaqak0Fh+b6G28nV92cF2J2y9lZQgXxfh9YF6FL+fAGVyPe15PoIGka58wVUJN/X834WxTL65wuoTL6vaRp5AiIHN9HcV6ZC+T21PQ9cySBZQu98AXEH4tTk99Q3jfs4WgLuZpDdjwWt5vZEFKUuPwe48wWLQq/5h3uBJwg7hzs28rtQw3g7sG8S5Xc6nQ7wXA0XQHobjqv8dbjHHAzjF41CbghFJLmrWRNe/nzAL95pjWLuC0VszF6EIhHyQePe0CRdgEj5y8DjGkVJH0GLjMF2X6R8gJ1ahZ2LKKoN94DLwCGU770TL/+IZnF7M8iWuApsUeovVv5xNG9H455GtZJBssRVMr8TqF1+T6G7cxgO4FDGnkZDfk/B0tx9Di5n6mW05Puip3DbcZrcydDH6MnvBdiF24zQIOkFYNTld8Hde58DzuIOxEl/rDVlKWHN4yE/FYTN83+cKNda4ESE/FOM+zky5Hn+VeCFBHlMfj+Q5/kvJchh8vtB2Dz/gZY5TP4gyDzPb/IFkOf5L7SIbfKHQdiDlBrN25j8AICPBCl/A081iGvyQwB+EsR83SCmyQ8BeCVAzvbImCY/FOBzQc4fROyzmvwICHuQ0tGIeCY/BmBbgKTXAmOZ/FiALwVJy8CagDgmPxbcg5R+F0R9GhDH5DcBeDNA1stCDJPfFOC0IOuKsN7kNwXYgPvrdhgfDFlv8tuAfL5gFdg6YK1tI7YFebTxuwHrTH4KkCco3u2zxuSnAvfQi2HMPPJ6k5+SgAvwTM9rTX5qkD+CFnH/7ehZ5DNZJj+WSKkmPzWkP19g8mPAjTGmmiU1+U3ADfSa/JLQbrTd5LeF5ucLjpj8hACzhH0nLKN1FHTS4P/zBQu4feJ7uGf8XMfdup5F4xC0YRiGYSjyL7f3bGGjrD3EAAAAAElFTkSuQmCC",
+	key = "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",
+	globe = "iVBORw0KGgoAAAANSUhEUgAAAGAAAABgCAYAAADimHc4AAAABmJLR0QA/wD/AP+gvaeTAAALIUlEQVR4nO2da6xdRRXH/9NbWqAUWqBQQPCFt1Qe5SUaH4BQ8PFFBI3GQmMV8QGCMb6ICIggCEgoYCDGxAhIQUQSv6gp0BetRbFVBKS35VFoaUuhLbT2cYv354c5Nz3cs89ea8/e554LPf/kJDd39v7P2mv27FmzZs0aqYMOOuigg50Vod0CNAPQJWmCpMMkddf+7pY0WtIYSeMl7VK7fLuk1ZI2SHpNUk/tt0TSU5J6Qgj/G0z5vRhSDQC8S9Lk2u9USXtXRL1J0kJJD9R+i0MIfRVxv7kBHAJ8H1jG4OF54Bqgu93P3xYAw4FzgPmDqPRmmE+UZXi79dJyACOAqUBPW1WejWeBi4Bd262nygEE4EvAi+3UsBMriC/JkBofkwEcBTzcXp0mYS5wZLv1lwxgJHAtsL29eiyFXuJgPaJVempJNyOak/dIOr4slcrLWAXH3yR9LoTwXEmeBgyrmhA4S9IipSt/paTpkn6val6QoPgy3CTpxUSOEyQtBj5dgTytA3BpYlffDNwOTAaGAcfg+3TdAdzluK4XmAR0AafX7tuSIGcfcEm79dwAopVzQ8IDbQSmAwfWcXUBjzrufQzYHRgFPOm4fiEwrK6eccDlwIYEuW+p52oriLb97wo+QC9wHdDgagC+4bh/MzCx7p4j8b3RX8mob2/g+ppMRXA3LRycXSB+Lu4pKPhc4IgmfGOBlx0cF2Tc+23HfWuAPZvUPQF4oOCz3E90GrYHwC8KCLsVOJ+cCQ6xV1iYncVBfBnmOe6/Kqf+AFxYk9WLm6vSZyEAlxUQ8lng/QbfQdifka3AhByOicA2g2MTMN6Q5VhgaYHnG9yBGTirgHAzadLtB3De4uC60sFzjYPnBgfPGOAh5zP2AWd49VcKwNuBV5yC/QGHcwsYj/32rwBGObhGA6sNrv8C+zq4RhAHWw/WA+/06jEJRPfC350C/RKnqQZc5eD7cgE5v+7gu9zJNaz2LB48QistI6Jvx4N78Ct/N2zLp4cC/npgF+Bpg3MNMNLJNwy/qX2NV85CAI7AZys/6H2wGu80B+fUBHnPdfCeU4BvBPAXB+d24Kii8lqVB3wmXg+OAXcA9wKDczmwi83UwDuCOG7kYV5Bzr3wLZ3Oocr1BOJiioWtwLEFeSc6eL9TQu6LDe4+4D0FOSfhm3W7e5dV4UhgpaPC8xO4rzQ4NwNjS8i+r0NZlyfwftOhj+epYkAGvuaobC4JXQ57oLy9Avktb+l/EjgDMMuhl3PLCt+FPSNMGnSAox0PcEqpB4j1nO6o5/AE3sOxjZKnKRNtQQzXsHBtIvclBu8KKnD5El8ia2L2g0Rujwv+7DLCWxbKayR+o7FjgqYnC95Y161GXbMTefchrmnk4eFUoQ8lWgl5SJp0AHtir3idmiR4dn0fM+raBuyeyH29wd0HvDuF+AqDeAtwQKLQnzS4X6PCKT2wK9H/k4fJidzjidZaHi5rdn/mN5Zo0VjfrntDCKtShJb0IaN8TgihN5G7ASGErZKsT8GHE7lXS7rfuOxsmliJzQa5IyRZnr0yJmLu2oCkOSW4UzktmfJwh1F+qKSJWQXNGsAy/1ZKmmVck4nam3CMcdmCFG4D843y40pwz5RkfQ0yddqsAT5qkN1bYsPD25Qf9/+6pMWJ3Hn4h6Q8mcdhrJQ1Q00X9xmX+RqAuMh8okH2oE+0TGR2xTosCSFsKcGfiRDCJklPG5e9t0QVDxnlJ5Exr8nqARMk5dn2r0sq5EUcAGtTxJMluC08YZSX2bAxW/k9bO8s/mYNkIfFIYRX/XI1wBrcl5TgtmBxJy8phhDWS/qncVmDbrMa4DCD5F9eoZrgYKP82ZL8Zbgt2Sw8ZpRX0gPKvqHWQLeiJH8Z7qSJZR0s3bh6gDVt7nGLk439jPLVJfnzYJmK40ryWw1w6MB/ZEWY/VtxItZB9XgshDCp/h9ZPaCqvbkdNKJBt1k9YJuk9kb9vnXRG0J4Q8RIVgMwePLsfAghvEHnQ2OTwU6MrAaozA3cQQMadJvVAC8PgiA7K14a+I+sBlg3CILsrGjQbVYDbDBIzggloJi/Jw+TyvAbdVs+/8dL8p9p8DfoNqsBlhkkZVO8rDXKk3zyTuxvlJf9/FpunAbdZjVAYX9GQVjugLIOsTwcYpSnbuTuR2E/WkoDlA29thxirdxlYnG/UJLf0k0lDXAssJdbpEY8Y5S3MouV9YYmu8KJe56PNi5zN8D6HJIuSSf5RWuA5U0tHKdZANaSYxlP78nKn9iuy+JvuCHEBWYrhKNM1JoVjdxNYpRaHoA9ZLvayyyHWjqZHTISBTZrsdkG2WdI3CEeQlih/LnGcNlhKyk4XrH3NsPaEMKaFGJiBLRlgmYu2jdrAGuF/0DZsUN5WGSUf7AEdyrnoyW4T5NtPhdqgMdlD5aFN87V4RGjvMwY0wwnG+WWTHmwwjiXhhCKbQQBfmwEnG6hLs1MQe5PGNybKLDT0lHfbo4A2qRxDV9w7o9SiD3h6ambMzzh6aelcDep7+NGXVtJD0//ucHdR0zhlkRubaLYhGPLfxNuK5NiZVlIgNuMulLjXD0bNObmcVgLMrca5aMkXVxI6h34k1F+FtVsURouycr19udE+ksl7WFcc1sid6FNepNstgbuowxeqGCXDPbnB+qybxXgPRL7M7qMsimRga86HmAeadtUrca9s5TwsY4ZRh1WvGgWZyDuhrfgTjCSV9lI7C3/ABcmcP/E4NxMRl65AvzjsLNfNd0+lMP7LYc+qtmoXavwi44Ke4EPFOQ9zMH7vRJy/9Dg7gMaotUMzvdhZ+UCmJIqd1algbgb3sIyCnpKsbfCvkBaso6R2MnCcy2UDM6xwDMOPcyi6uTf+HaG91fuTgGPr3dNS5DXM3a5N1ETs6/MdHBup1VJv/HlY4OY3MibsGlXYK3Bt5RiCZtGEBMF5mE1/oRNXcB9zmf/qVfOwqg92CNOQYqkLLMGY4DzCsh5gYPvUidXF/Ar5zP/lYTPZSEQz3zxJFeFmNjUk7RvP2x/yotEn77FtScxHVkeNgL7OLhG4k9Mu45WJ+2rE+wMbD9RPx7EMTADNzq4rnbwWKkDAK5z8IzBl5IGoi4+5dVfJcA28erxHIaJChyA3Qu2kTNrxWcobARyw1OA4yh2qlOqO6YcgJsKCLmVmGkqL3WxZ5CfR8bYQvxWWyYtwBU59QfiJMtj5/ejsqwuhVET+DcFhO1XYGb4BrHbv+TguCjj3u867lsFjG5Sd8pZNzNodxp7imWX7cd2YrKjBlc2cJ7j/s3UZWAnZt/yJNxumE8Q88rdSPGzbmbQ7vT1/SD2BM/gNxCbiAc4HFTHNQyfqfsE8fCG0cBTjusX8MYDHPYjHuDwaoLcN9PuNz8LxIHZax3VYwtwJzGxUhcxNaRn1n0XPjNxG9F93EVcDv0t6UeYJKU3a4bKT1EiZhH/teKJpylYpZj4Yn9Jn61IrLsVQ2HOVHrw7zpJ00IIf6xIJkmtO8bqHYonF51QlkpD4xirhZI+H0JYXpKnAS35joV43tZHJP1M8azfZKoqxClx73ZJV0s6sRXKHxQA3fi8iEMNc2hy1s2bDkQraSrRtz/UsRyYwlvlMM96sOM42yVtVXE2nuGtepztQBAPdJ5CnBWnmK1Voa8mwxdo53FU7QRwMPFI88E85Hk50e9UaD24FRhS3zliCN/k2u8USabP3omNisG3D9R+i0IIQyIlw5BqgHoQp/rdihm8JtT+7pY0WjHryP7akVSkV9IaSa8oKrun9luiuC12adbmiA466KCDDjpoJ/4PLy0FqMDBEqsAAAAASUVORK5CYII=",
+	code = "iVBORw0KGgoAAAANSUhEUgAAAGAAAABgCAYAAADimHc4AAAABmJLR0QA/wD/AP+gvaeTAAAB4klEQVR4nO3cTU7rQBBF4YjFZAEwCJv20ogSNnCZuEQLE7tbcv9U9fkkxu53D3KeiOXLBQAAAAAAAAAAAACAE0m6Slokfa8/i6TrLNfvStJN0kNb9xYjrOPf/7n+Q9Kt9vW72hnfLA3OsOxcP26EjPEl6dngHM+DM8SLkDn+KAFiRSgYX+p/C4oVoXD83h/CsSJI+hj1HyrpXdJXwdk+W53tFCOPn5wxZgQP4ydnjRXB0/jJmWNE8Di+cR/B8/jGbYQI4xt3ESKNb9xEiDi+GT5C5PHNsBFmGN8MF2Gm8c0wEWYc33SPMPP4plsExv/VPALjbzWLwPivVY/A+MeqRdAsX9mdQDW+ctVMX1qfoDDC8UMHmu2xjRMURNg8dvPW48DYIW5BRQp++6XMWxAfwpkKx89/7km9//bhgGr/V50Ir1UfP7kQEf5oNn5yQSKsmo+fXHj6CN3GTw4wbYTu4ycHmS7CMOMnB5omwnDjJwcLH2HY8ZMDho0w/PjJQcNFcDN+cuAwEdyNbyJEcDu+8RzB/fjGY4Qw4xtPEcKNbzxECDu+GTlC+PGNeFVBf4UReFlHDQUReF1NLZkRRggQb3yTEaH3LSju+GYnQu8P4fjjG/HaSgAAAAAAAAAAAADABH4ATjUT6b9jTY4AAAAASUVORK5CYII=",
+	sparkles = "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",
+	pointer = "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",
 	settings = "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",
 }
 
@@ -552,38 +638,80 @@ Platform Rules:
 }
 local PersonalityOrder = { "Friendly", "Monday", "Toxic", "Shy Feminine", "Chill-Human", "Siri" }
 
------------------------------------------------------------------- providers (all OpenAI-compatible, all have a free tier)
+------------------------------------------------------------------ providers (OpenAI-compatible, each has a free tier)
 local Providers = {
-	Groq = {
-		url = "https://api.groq.com/openai/v1",
-		models = { "openai/gpt-oss-20b", "openai/gpt-oss-120b", "qwen/qwen3.8-27b" },
-		keyUrl = "console.groq.com/keys",
-		prefer = { "gpt%-oss%-20b", "gpt%-oss%-120b", "qwen" },
-	},
-	Gemini = {
-		url = "https://generativelanguage.googleapis.com/v1beta/openai",
-		models = { "gemini-2.5-flash", "gemini-2.5-flash-lite" },
-		keyUrl = "aistudio.google.com/apikey",
-		prefer = { "2%.5%-flash$", "flash%-lite", "flash" },
-	},
-	OpenRouter = {
-		url = "https://openrouter.ai/api/v1",
-		models = { "openrouter/free" },
-		keyUrl = "openrouter.ai/keys",
-		prefer = { "^openrouter/free$", "gpt%-oss", ":free" },
-	},
+	Groq = { url = "https://api.groq.com/openai/v1", keyUrl = "console.groq.com/keys", prefix = "^gsk_", default = "openai/gpt-oss-20b", prefer = { "gpt%-oss%-20b", "gpt%-oss%-120b", "qwen" } },
+	Gemini = { url = "https://generativelanguage.googleapis.com/v1beta/openai", keyUrl = "aistudio.google.com/apikey", prefix = "^AIza", default = "gemini-2.5-flash", prefer = { "2%.5%-flash$", "flash%-lite", "flash" } },
+	OpenRouter = { url = "https://openrouter.ai/api/v1", keyUrl = "openrouter.ai/keys", prefix = "^sk%-or%-", default = "openrouter/free", prefer = { "^openrouter/free$", "gpt%-oss", ":free" } },
+	Cerebras = { url = "https://api.cerebras.ai/v1", keyUrl = "cloud.cerebras.ai", prefix = "^csk%-", default = "", prefer = { "gpt%-oss", "llama", "qwen" } },
+	NVIDIA = { url = "https://integrate.api.nvidia.com/v1", keyUrl = "build.nvidia.com", prefix = "^nvapi%-", default = "", prefer = { "llama%-3%.3", "llama", "nemotron" } },
+	HuggingFace = { url = "https://router.huggingface.co/v1", keyUrl = "huggingface.co/settings/tokens", prefix = "^hf_", default = "", prefer = { "gpt%-oss", "Llama", "Qwen" } },
 }
-local ProviderOrder = { "Groq", "Gemini", "OpenRouter" }
+local ProviderOrder = { "Groq", "Gemini", "OpenRouter", "Cerebras", "NVIDIA", "HuggingFace" }
+local function detectProvider(key)
+	for _, n in ipairs(ProviderOrder) do
+		if key:find(Providers[n].prefix) then
+			return n
+		end
+	end
+	return nil
+end
+
+------------------------------------------------------------------ prompts you create or edit live in your data folder, never in this script
+local Pers = readJson("personalities.json", nil)
+if type(Pers) ~= "table" then
+	Pers = {}
+end
+if type(Pers.custom) ~= "table" then
+	Pers.custom = {}
+end
+if type(Pers.overrides) ~= "table" then
+	Pers.overrides = {}
+end
+local function savePers()
+	writeJson("personalities.json", Pers)
+end
+local function personaIsCustom(name)
+	for _, c in ipairs(Pers.custom) do
+		if c.name == name then
+			return true
+		end
+	end
+	return false
+end
+local function personaText(name)
+	local o = Pers.overrides[name]
+	if type(o) == "string" and o ~= "" then
+		return o
+	end
+	for _, c in ipairs(Pers.custom) do
+		if c.name == name then
+			return c.prompt
+		end
+	end
+	return Personalities[name]
+end
+local function personaNames()
+	local l = {}
+	for _, n in ipairs(PersonalityOrder) do
+		l[#l + 1] = n
+	end
+	for _, c in ipairs(Pers.custom) do
+		l[#l + 1] = c.name
+	end
+	return l
+end
 
 ------------------------------------------------------------------ settings
 local Default = {
 	Enabled = true,
 	AutoReply = true,
 	Names = { "warmachine12908", "Sofi" },
-	Provider = "Groq",
-	Keys = { Groq = "", Gemini = "", OpenRouter = "" },
-	Models = { Groq = "openai/gpt-oss-20b", Gemini = "gemini-2.5-flash", OpenRouter = "openrouter/free" },
-	ModelLists = {},
+	Slots = {},
+	Roles = { main = 1, coding = 1, ask = 1, world = 1 },
+	KeysHelp = true,
+	ShareLoad = false,
+	SlotCount = 1,
 	Personality = "Friendly",
 	CustomPrompt = "",
 	Temperature = 0.7,
@@ -601,8 +729,17 @@ local Default = {
 	GroupMode = false,
 	SmartMode = false,
 	MaxPerMinute = 8,
+	WorldSight = false,
+	WorldHear = false,
+	MouseMode = "Off",
+	CursorVisible = true,
+	CodingUseWorld = true,
+	AskUseWorld = true,
 }
-local DICT = { Keys = true, Models = true, ModelLists = true }
+for i = 1, 4 do
+	Default.Slots[i] = { key = "", provider = "", model = "", models = {}, modelsAt = 0, on = true }
+end
+local DICT = { Roles = true }
 
 local cfg = deepcopy(Default)
 do
@@ -619,22 +756,60 @@ do
 				end
 			end
 		end
-	end
-	for prov, key in pairs(PRESET_KEYS) do
-		if key ~= "" and (cfg.Keys[prov] or "") == "" then
-			cfg.Keys[prov] = key
+		-- older versions kept one key per provider: move them into key slots
+		if type(saved.Slots) ~= "table" and type(saved.Keys) == "table" then
+			local order = {}
+			if type(saved.Provider) == "string" and (saved.Keys[saved.Provider] or "") ~= "" then
+				order[1] = saved.Provider
+			end
+			for prov, k in pairs(saved.Keys) do
+				if k ~= "" and prov ~= saved.Provider then
+					order[#order + 1] = prov
+				end
+			end
+			cfg.Slots = deepcopy(Default.Slots)
+			for i = 1, math.min(4, #order) do
+				local prov = order[i]
+				local model = type(saved.Models) == "table" and saved.Models[prov] or ""
+				cfg.Slots[i] = { key = saved.Keys[prov], provider = prov, model = tostring(model or ""), models = {}, modelsAt = 0, on = true }
+			end
+			cfg.SlotCount = math.max(1, math.min(4, #order))
 		end
 	end
-	if not Providers[cfg.Provider] then
-		cfg.Provider = "Groq"
+	if type(cfg.Slots) ~= "table" then
+		cfg.Slots = {}
 	end
-	if not Personalities[cfg.Personality] then
+	for i = 1, 4 do
+		local s = type(cfg.Slots[i]) == "table" and cfg.Slots[i] or {}
+		local key = tostring(s.key or "")
+		local prov = (Providers[s.provider or ""] and s.provider) or (key ~= "" and detectProvider(key)) or ""
+		cfg.Slots[i] = { key = key, provider = prov, model = tostring(s.model or ""), models = type(s.models) == "table" and s.models or {}, modelsAt = tonumber(s.modelsAt) or 0, on = s.on ~= false }
+	end
+	for i, k in ipairs(PRESET_KEYS) do
+		if i <= 4 and type(k) == "string" and k ~= "" and cfg.Slots[i].key == "" then
+			cfg.Slots[i].key = k
+			cfg.Slots[i].provider = detectProvider(k) or ""
+		end
+	end
+	cfg.SlotCount = math.max(1, math.min(4, tonumber(cfg.SlotCount) or 1))
+	for i = 1, 4 do
+		local s = cfg.Slots[i]
+		if s.provider ~= "" and s.model == "" then
+			s.model = Providers[s.provider].default
+		end
+		if s.key ~= "" and i > cfg.SlotCount then
+			cfg.SlotCount = i
+		end
+	end
+	for _, r in ipairs({ "main", "coding", "ask", "world" }) do
+		local v = tonumber(cfg.Roles[r]) or 1
+		cfg.Roles[r] = (v >= 1 and v <= 4) and math.floor(v) or 1
+	end
+	if not personaText(cfg.Personality) then
 		cfg.Personality = "Friendly"
 	end
-	for prov, P in pairs(Providers) do
-		if type(cfg.Models[prov]) ~= "string" or cfg.Models[prov] == "" then
-			cfg.Models[prov] = P.models[1]
-		end
+	if cfg.MouseMode ~= "Ask" and cfg.MouseMode ~= "Auto" then
+		cfg.MouseMode = "Off"
 	end
 	if type(cfg.Names) ~= "table" or #cfg.Names == 0 then
 		cfg.Names = deepcopy(Default.Names)
@@ -704,8 +879,23 @@ Emo.a = tonumber(Emo.a) or 0.3
 Emo.t = tonumber(Emo.t) or os.time()
 Emo.lastMsg = tonumber(Emo.lastMsg) or os.time()
 
+local World = {} -- sight, hearing, world memory and the virtual mouse (filled in further down)
+local AskMem = capTable(readJson("ask_memory.json", {}), CAP_ASK)
+local CodeHist = capTable(readJson("coding_history.json", {}), 40)
+
 local Dirty = {}
 local function flush(force)
+	if World.flush then
+		World.flush(force)
+	end
+	if Dirty.ask or force then
+		writeJson("ask_memory.json", AskMem)
+		Dirty.ask = false
+	end
+	if Dirty.code or force then
+		writeJson("coding_history.json", CodeHist)
+		Dirty.code = false
+	end
 	if Dirty.chat or force then
 		writeJson("chat_memory.json", Chat)
 		Dirty.chat = false
@@ -858,21 +1048,14 @@ local function extractUrls(s)
 	return urls
 end
 
------------------------------------------------------------------- LLM
-local BackoffUntil = 0
-
-local function modelList(prov)
-	local l = cfg.ModelLists[prov]
-	if type(l) == "table" and #l > 0 then
-		return l
-	end
-	return Providers[prov].models
-end
-
+------------------------------------------------------------------ LLM + API key manager (up to 4 keys working together)
 local function extraParams(prov, model)
 	local m = model:lower()
 	if prov == "Groq" and m:find("gpt%-oss") then
 		return { reasoning_effort = "low", include_reasoning = false }
+	end
+	if prov == "Cerebras" and m:find("gpt%-oss") then
+		return { reasoning_effort = "low" }
 	end
 	if prov == "Gemini" and m:find("2%.5") and m:find("flash") then
 		return { reasoning_effort = "none" }
@@ -915,140 +1098,289 @@ local function cleanReply(content)
 	return oneLine(content)
 end
 
--- returns text, or nil + error message
-local function llm(messages, maxTokens)
-	local prov = cfg.Provider
-	local P = Providers[prov]
-	local key = cfg.Keys[prov]
-	if type(key) ~= "string" or key == "" then
-		return nil, "No " .. prov .. " API key yet (Bot tab)"
+local function cleanKeep(content)
+	if type(content) ~= "string" then
+		return ""
 	end
-	if os.clock() < BackoffUntil then
-		return nil, "Rate limited, waiting a few seconds"
-	end
-	local list = modelList(prov)
-	local tried = {}
-	local model = cfg.Models[prov]
-	local useExtras = true
-	for _ = 1, 5 do
-		tried[model] = true
-		local body = { model = model, messages = messages, temperature = cfg.Temperature, max_tokens = maxTokens or cfg.MaxTokens }
-		local extra = useExtras and extraParams(prov, model) or nil
-		if extra then
-			for k, v in pairs(extra) do
-				body[k] = v
+	content = content:gsub("<think>.-</think>", "")
+	content = content:gsub("<thinking>.-</thinking>", "")
+	return trim(content)
+end
+
+local Keys = { last = {} }
+do
+	local backoff, bad = {}, {}
+	local rr = 0
+
+	function Keys.active()
+		local l = {}
+		for i = 1, 4 do
+			local s = cfg.Slots[i]
+			if s.on and s.key ~= "" and s.provider ~= "" and not (bad[i] and os.clock() - bad[i] < 300) then
+				l[#l + 1] = i
 			end
-			body.max_tokens = body.max_tokens + 400 -- room for hidden reasoning
 		end
-		local raw, code = post(P.url .. "/chat/completions", key, body, prov)
-		local data = jdecode(raw)
-		if code >= 200 and code < 300 and type(data) == "table" and type(data.choices) == "table" and data.choices[1] then
-			local msg = data.choices[1].message or {}
-			local text = cleanReply(msg.content)
-			if text ~= "" then
-				if model ~= cfg.Models[prov] then
-					cfg.Models[prov] = model
-					saveCfg()
-					status("Model auto-switched to " .. model)
+		return l
+	end
+
+	function Keys.setKey(i, key)
+		local s = cfg.Slots[i]
+		key = (tostring(key or ""):gsub("[%s\"']", ""))
+		s.key = key
+		bad[i], backoff[i] = nil, nil
+		if key == "" then
+			s.provider, s.model, s.models, s.modelsAt = "", "", {}, 0
+			return nil
+		end
+		local prov = detectProvider(key)
+		if prov and s.provider ~= prov then
+			s.provider, s.model, s.models, s.modelsAt = prov, Providers[prov].default, {}, 0
+		end
+		return prov
+	end
+
+	function Keys.setProvider(i, prov)
+		local s = cfg.Slots[i]
+		if Providers[prov] and s.provider ~= prov then
+			s.provider, s.model, s.models, s.modelsAt = prov, Providers[prov].default, {}, 0
+		end
+	end
+
+	-- which keys to try, in order, for a job (main / coding / ask / world)
+	function Keys.order(role)
+		local act = Keys.active()
+		if #act == 0 then
+			return {}
+		end
+		local primary = cfg.Roles[role] or 1
+		local list = {}
+		if cfg.ShareLoad and #act > 1 then
+			rr = rr + 1
+			for k = 0, #act - 1 do
+				list[#list + 1] = act[(rr + k - 1) % #act + 1]
+			end
+		else
+			local isAct = false
+			for _, i in ipairs(act) do
+				if i == primary then
+					isAct = true
+				end
+			end
+			if isAct then
+				list[1] = primary
+			end
+			if cfg.KeysHelp or not isAct then
+				for _, i in ipairs(act) do
+					if i ~= primary then
+						list[#list + 1] = i
+					end
+				end
+			end
+		end
+		local now, ready = os.clock(), {}
+		for _, i in ipairs(list) do
+			if not (backoff[i] and now < backoff[i]) then
+				ready[#ready + 1] = i
+			end
+		end
+		return ready
+	end
+
+	local function callSlot(i, messages, maxTokens, keep)
+		local s = cfg.Slots[i]
+		local P = Providers[s.provider]
+		local list = (#s.models > 0) and s.models or { P.default }
+		local tried = {}
+		local model = s.model ~= "" and s.model or (list[1] or "")
+		if model == "" then
+			return nil, "Key " .. i .. ": pick a model first"
+		end
+		local useExtras = true
+		for _ = 1, 5 do
+			tried[model] = true
+			local body = { model = model, messages = messages, temperature = cfg.Temperature, max_tokens = maxTokens or cfg.MaxTokens }
+			local extra = useExtras and extraParams(s.provider, model) or nil
+			if extra then
+				for k, v in pairs(extra) do
+					body[k] = v
+				end
+				body.max_tokens = body.max_tokens + 400 -- room for hidden reasoning
+			end
+			local raw, code = post(P.url .. "/chat/completions", s.key, body, s.provider)
+			local data = jdecode(raw)
+			if code >= 200 and code < 300 and type(data) == "table" and type(data.choices) == "table" and data.choices[1] then
+				local msg = data.choices[1].message or {}
+				local text = keep and cleanKeep(msg.content) or cleanReply(msg.content)
+				if text ~= "" then
+					if model ~= s.model then
+						s.model = model
+						saveCfg()
+						status("Key " .. i .. " switched to model " .. model)
+					end
+					return text
+				end
+				return nil, "Empty reply from " .. model .. " (try a higher Max tokens)"
+			end
+			local errText = errorText(data, raw)
+			if isModelError(code, raw) then
+				local nextModel
+				for _, m in ipairs(list) do
+					if not tried[m] then
+						nextModel = m
+						break
+					end
+				end
+				if not nextModel then
+					return nil, "Key " .. i .. ": " .. model .. " isn't available. Open the Keys tab and refresh models"
+				end
+				model = nextModel
+				useExtras = true
+			elseif code == 429 then
+				backoff[i] = os.clock() + 20
+				return nil, "Key " .. i .. " rate limited (429)"
+			elseif code == 401 or code == 403 then
+				bad[i] = os.clock()
+				return nil, "Key " .. i .. " was rejected (" .. tostring(code) .. ")"
+			elseif code == 400 and extra and errText:lower():find("reason") then
+				useExtras = false
+			else
+				return nil, ("Key " .. i .. " HTTP " .. tostring(code) .. ": " .. errText):sub(1, 160)
+			end
+		end
+		return nil, "Key " .. i .. ": no working model found"
+	end
+	Keys.call = callSlot
+
+	function Keys.llm(messages, maxTokens, role, keep)
+		role = role or "main"
+		local order = Keys.order(role)
+		if #order == 0 then
+			if #Keys.active() == 0 then
+				return nil, "No API key yet (Keys tab)"
+			end
+			return nil, "All keys are resting after a rate limit, try again in a few seconds"
+		end
+		local lastErr
+		for n, i in ipairs(order) do
+			local text, err = callSlot(i, messages, maxTokens, keep)
+			if text then
+				Keys.last[role] = i
+				if n > 1 then
+					status("Key " .. i .. " helped out (" .. tostring(lastErr) .. ")")
 				end
 				return text
 			end
-			return nil, "Empty reply from " .. model .. " (try a higher Max tokens)"
+			lastErr = err
 		end
-		local errText = errorText(data, raw)
-		if code == 429 then
-			BackoffUntil = os.clock() + 20
-			return nil, "Rate limited (429), pausing 20s"
-		elseif code == 401 or code == 403 then
-			return nil, "API key rejected (" .. tostring(code) .. ")"
-		elseif code == 400 and extra and errText:lower():find("reason") then
-			useExtras = false
-		elseif isModelError(code, raw) then
-			local nextModel
-			for _, m in ipairs(list) do
-				if not tried[m] then
-					nextModel = m
-					break
+		return nil, lastErr
+	end
+
+	-- asks the provider which models exist right now (so new models appear and dead ones vanish)
+	function Keys.refresh(i)
+		local s = cfg.Slots[i]
+		if s.key == "" or s.provider == "" then
+			return false, "Add a key first"
+		end
+		local P = Providers[s.provider]
+		local raw, code = httpGet(P.url .. "/models", { ["Authorization"] = "Bearer " .. s.key })
+		local data = jdecode(raw)
+		if code < 200 or code >= 300 or type(data) ~= "table" or type(data.data) ~= "table" then
+			if code == 401 or code == 403 then
+				bad[i] = os.clock()
+			end
+			return false, "Could not load models (HTTP " .. tostring(code) .. ")"
+		end
+		local skip = { "whisper", "tts", "guard", "embed", "orpheus", "playai", "image", "imagen", "veo", "lyria", "moderation", "safeguard", "transcribe", "aqa", "audio", "live", "robotics", "rerank", "reward", "vision-preview", "-vl", "ocr" }
+		local list = {}
+		for _, m in ipairs(data.data) do
+			local id = tostring(m.id or ""):gsub("^models/", "")
+			local low = id:lower()
+			local ok = id ~= "" and m.active ~= false
+			for _, w in ipairs(skip) do
+				if low:find(w, 1, true) then
+					ok = false
 				end
 			end
-			if not nextModel then
-				return nil, model .. " isn't available: " .. errText:sub(1, 80)
-			end
-			model = nextModel
-			useExtras = true
-		else
-			return nil, ("HTTP " .. tostring(code) .. ": " .. errText):sub(1, 160)
-		end
-	end
-	return nil, "No working model found"
-end
-
-local function refreshModels()
-	local prov = cfg.Provider
-	local P = Providers[prov]
-	local key = cfg.Keys[prov]
-	if key == "" then
-		return false, "Add your " .. prov .. " key first"
-	end
-	local raw, code = httpGet(P.url .. "/models", { ["Authorization"] = "Bearer " .. key })
-	local data = jdecode(raw)
-	if code < 200 or code >= 300 or type(data) ~= "table" or type(data.data) ~= "table" then
-		return false, "Could not load models (HTTP " .. tostring(code) .. ")"
-	end
-	local skip = { "whisper", "tts", "guard", "embed", "orpheus", "playai", "image", "imagen", "veo", "lyria", "moderation", "safeguard", "transcribe", "aqa", "audio", "live", "robotics" }
-	local list = {}
-	for _, m in ipairs(data.data) do
-		local id = tostring(m.id or ""):gsub("^models/", "")
-		local low = id:lower()
-		local ok = id ~= ""
-		for _, s in ipairs(skip) do
-			if low:find(s, 1, true) then
+			if s.provider == "OpenRouter" and not (low:find(":free", 1, true) or low == "openrouter/free") then
 				ok = false
 			end
+			if s.provider == "Gemini" and not (low:find("gemini", 1, true) or low:find("gemma", 1, true)) then
+				ok = false
+			end
+			if ok then
+				list[#list + 1] = id
+			end
 		end
-		if prov == "OpenRouter" and not (low:find(":free", 1, true) or low == "openrouter/free") then
-			ok = false
+		table.sort(list)
+		if #list == 0 then
+			return false, "No usable models returned"
 		end
-		if prov == "Gemini" and not (low:find("gemini", 1, true) or low:find("gemma", 1, true)) then
-			ok = false
+		while #list > 60 do
+			table.remove(list)
 		end
-		if ok then
-			list[#list + 1] = id
+		local old = {}
+		for _, id in ipairs(s.models) do
+			old[id] = true
 		end
-	end
-	table.sort(list)
-	if #list == 0 then
-		return false, "No usable models returned"
-	end
-	while #list > 40 do
-		table.remove(list)
-	end
-	cfg.ModelLists[prov] = list
-	local cur = cfg.Models[prov]
-	local valid = false
-	for _, id in ipairs(list) do
-		if id == cur then
-			valid = true
-		end
-	end
-	if not valid then
-		local pick = list[1]
-		for _, pat in ipairs(P.prefer) do
+		local fresh = {}
+		if next(old) ~= nil then
 			for _, id in ipairs(list) do
-				if id:find(pat) then
-					pick = id
+				if not old[id] then
+					fresh[#fresh + 1] = id
+				end
+			end
+		end
+		s.models, s.modelsAt = list, os.time()
+		local valid = false
+		for _, id in ipairs(list) do
+			if id == s.model then
+				valid = true
+			end
+		end
+		if not valid then
+			local pick
+			for _, pat in ipairs(P.prefer) do
+				for _, id in ipairs(list) do
+					if id:find(pat) then
+						pick = id
+						break
+					end
+				end
+				if pick then
 					break
 				end
 			end
-			if pick ~= list[1] or list[1]:find(pat) then
-				break
+			s.model = pick or list[1]
+		end
+		saveCfg()
+		return true, #list .. " models, using " .. s.model, fresh
+	end
+
+	-- keeps every key's model list fresh without you doing anything
+	task.spawn(function()
+		while Alive do
+			for i = 1, 4 do
+				local s = cfg.Slots[i]
+				if s.key ~= "" and s.provider ~= "" and (#s.models == 0 or os.time() - s.modelsAt > 3600) then
+					local ok, msg, fresh = Keys.refresh(i)
+					if ok and fresh and #fresh > 0 then
+						status("New " .. s.provider .. " models: " .. table.concat(fresh, ", "))
+					end
+					if Keys.onRefresh then
+						pcall(Keys.onRefresh, i)
+					end
+				end
+			end
+			for _ = 1, 20 do
+				if not Alive then
+					break
+				end
+				task.wait(30)
 			end
 		end
-		cfg.Models[prov] = pick
-	end
-	saveCfg()
-	return true, #list .. " models found, using " .. cfg.Models[prov]
+	end)
 end
+local llm = Keys.llm
 
 ------------------------------------------------------------------ names / mentions
 local function boundaryPattern(n, ci)
@@ -1142,7 +1474,7 @@ local function addKnowledge(text, title, trig)
 end
 
 local function makeSystemPrompt()
-	local sys = Personalities[cfg.Personality] or Personalities.Friendly
+	local sys = personaText(cfg.Personality) or Personalities.Friendly
 	local custom = trim(cfg.CustomPrompt)
 	if custom ~= "" then
 		sys = sys .. "\n" .. custom
@@ -1151,8 +1483,8 @@ local function makeSystemPrompt()
 	return sys
 end
 
-local function askRaw(system, user, maxTokens)
-	return llm({ { role = "system", content = system }, { role = "user", content = user } }, maxTokens)
+local function askRaw(system, user, maxTokens, role)
+	return llm({ { role = "system", content = system }, { role = "user", content = user } }, maxTokens, role)
 end
 
 local FailAt = {}
@@ -1602,6 +1934,10 @@ Use "respond":false and "reply":"" when you stay quiet. "emotion" is how you fee
 		if #names > 0 then
 			sys = sys .. "\n\n[Players here] " .. table.concat(names, ", ")
 		end
+		local wb = World.chatBlock and World.chatBlock(items)
+		if wb then
+			sys = sys .. "\n\n[What you can see and hear]\n" .. wb
+		end
 		local recent, related = context(items)
 		if #recent > 0 then
 			sys = sys .. "\n\n[What just happened]\n" .. table.concat(recent, "\n")
@@ -1643,6 +1979,1845 @@ Use "respond":false and "reply":"" when you stay quiet. "emotion" is how you fee
 			topic = trim(tostring(d.topic or "")),
 			why = trim(tostring(d.why or "")),
 		}
+	end
+end
+
+------------------------------------------------------------------ world: sight, hearing, world memory (virtual mouse is further below)
+do
+	local function svc(n)
+		local ok, s2 = pcall(game.GetService, game, n)
+		return ok and s2 or nil
+	end
+	local Market, GuiSvc, CoreGui = svc("MarketplaceService"), svc("GuiService"), svc("CoreGui")
+	local function cam()
+		return workspace.CurrentCamera
+	end
+	local function insetY()
+		local ok, v = pcall(function()
+			return GuiSvc:GetGuiInset().Y
+		end)
+		return ok and tonumber(v) or 0
+	end
+	World.insetY = insetY
+	local function r0(x)
+		return string.format("%d", math.floor((tonumber(x) or 0) + 0.5))
+	end
+	World.r0 = r0
+
+	local function assetId(s2)
+		s2 = tostring(s2 or "")
+		local id = s2:match("rbxassetid://(%d+)") or s2:match("[?&]id=(%d+)") or s2:match("^(%d+)$")
+		return id and tonumber(id) or nil
+	end
+
+	-- asset names (song titles, emote names...) come from the catalog and are cached
+	local NameCache, NameQ, NameSeen, NameBusy = {}, {}, {}, false
+	function World.nameOf(raw)
+		local id = assetId(raw)
+		if not id then
+			return nil
+		end
+		local c = NameCache[id]
+		if c ~= nil then
+			return c or nil
+		end
+		if not NameSeen[id] and Market then
+			NameSeen[id] = true
+			NameQ[#NameQ + 1] = id
+			if not NameBusy then
+				NameBusy = true
+				task.spawn(function()
+					while Alive and #NameQ > 0 do
+						local nid = table.remove(NameQ, 1)
+						local ok, info = pcall(Market.GetProductInfo, Market, nid)
+						NameCache[nid] = (ok and type(info) == "table" and type(info.Name) == "string") and info.Name or false
+						task.wait(0.6)
+					end
+					NameBusy = false
+				end)
+			end
+		end
+		return nil
+	end
+
+	local GameInfo
+	function World.gameName()
+		if not GameInfo then
+			GameInfo = { name = "Place " .. tostring(game.PlaceId), desc = "" }
+			if Market then
+				local ok, info = pcall(Market.GetProductInfo, Market, game.PlaceId)
+				if ok and type(info) == "table" then
+					GameInfo.name = tostring(info.Name or GameInfo.name)
+					GameInfo.desc = tostring(info.Description or "")
+				end
+			end
+		end
+		return GameInfo.name, GameInfo.desc
+	end
+
+	------------------------------------------------------------ index of sounds / prompts / seats in the map
+	local weak = { __mode = "k" }
+	local Idx = { sound = setmetatable({}, weak), prompt = setmetatable({}, weak), click = setmetatable({}, weak), seat = setmetatable({}, weak) }
+	local function reg(d)
+		if d:IsA("Sound") then
+			Idx.sound[d] = true
+		elseif d:IsA("ProximityPrompt") then
+			Idx.prompt[d] = true
+		elseif d:IsA("ClickDetector") then
+			Idx.click[d] = true
+		elseif d:IsA("Seat") or d:IsA("VehicleSeat") then
+			Idx.seat[d] = true
+		end
+	end
+	World.idx = Idx
+
+	local function posOf(inst)
+		local ok, v = pcall(function()
+			if inst:IsA("BasePart") then
+				return inst.Position
+			end
+			if inst:IsA("Attachment") then
+				return inst.WorldPosition
+			end
+			if inst:IsA("Model") then
+				return inst:GetPivot().Position
+			end
+			local par = inst.Parent
+			if par then
+				if par:IsA("BasePart") then
+					return par.Position
+				end
+				if par:IsA("Attachment") then
+					return par.WorldPosition
+				end
+				if par:IsA("Model") then
+					return par:GetPivot().Position
+				end
+			end
+			return nil
+		end)
+		return ok and v or nil
+	end
+	local function myRoot()
+		local c = lp.Character
+		return c and c:FindFirstChild("HumanoidRootPart")
+	end
+	local function playerOf(inst)
+		for _, pl in ipairs(Players:GetPlayers()) do
+			local c = pl.Character
+			if c and (inst == c or inst:IsDescendantOf(c)) then
+				return pl
+			end
+		end
+		return nil
+	end
+
+	------------------------------------------------------------ what each player is doing
+	local DEFAULT_EMOTES = { [507770239] = "wave", [507770453] = "point", [507771019] = "dance", [507776043] = "dance (2)", [507777268] = "dance (3)", [507770818] = "laugh", [507770677] = "cheer" }
+	local MOVE_NAMES = { idle = true, walk = true, run = true, jump = true, fall = true, climb = true, swim = true, swimidle = true, sit = true, toolnone = true, toolslash = true, toollunge = true }
+	local moveCache = setmetatable({}, weak)
+	local function movementIds(char)
+		local c = moveCache[char]
+		if c and os.clock() - c.t < 30 then
+			return c.set
+		end
+		local set = {}
+		local an = char:FindFirstChild("Animate")
+		if an then
+			for _, d in ipairs(an:GetDescendants()) do
+				if d:IsA("Animation") and d.Parent and MOVE_NAMES[d.Parent.Name:lower()] then
+					local id = assetId(d.AnimationId)
+					if id then
+						set[id] = true
+					end
+				end
+			end
+		end
+		moveCache[char] = { t = os.clock(), set = set }
+		return set
+	end
+	local function animName(id, anim)
+		if DEFAULT_EMOTES[id] then
+			return DEFAULT_EMOTES[id]
+		end
+		local n = World.nameOf(id)
+		if n then
+			return n
+		end
+		local nm = anim and anim.Name
+		if nm and not nm:lower():find("^animation") then
+			return nm
+		end
+		return "animation " .. tostring(id)
+	end
+	local PACKW = { idle = 1, walk = 1, run = 1, jump = 1, fall = 1, climb = 1, swim = 1, animation = 1, animations = 1, pack = 1 }
+	local packCache = setmetatable({}, weak)
+	local function packOf(p, hum)
+		local c = packCache[p]
+		if not c or os.clock() - c.t > 120 then
+			c = { t = os.clock(), ids = {} }
+			packCache[p] = c
+			pcall(function()
+				local d = hum:GetAppliedDescription()
+				for _, f in ipairs({ "IdleAnimation", "WalkAnimation", "RunAnimation", "JumpAnimation", "FallAnimation", "ClimbAnimation", "SwimAnimation" }) do
+					local v = tonumber(d[f])
+					if v and v > 0 then
+						c.ids[#c.ids + 1] = v
+					end
+				end
+			end)
+		end
+		if #c.ids == 0 then
+			return "default"
+		end
+		for _, id in ipairs(c.ids) do
+			local n = World.nameOf(id)
+			if n then
+				local words = {}
+				for w in n:gmatch("%S+") do
+					words[#words + 1] = w
+				end
+				while #words > 1 and PACKW[words[#words]:lower()] do
+					table.remove(words)
+				end
+				return table.concat(words, " ")
+			end
+		end
+		return "custom pack (id " .. tostring(c.ids[1]) .. ")"
+	end
+
+	local function soundInfo(s2, myPos)
+		local so = { inst = s2, id = tostring(s2.SoundId), vol = tonumber(s2.Volume) or 0, looped = s2.Looped and true or false }
+		so.title = World.nameOf(s2.SoundId)
+		local p3 = posOf(s2)
+		if p3 and myPos then
+			so.dist = (p3 - myPos).Magnitude
+		end
+		local owner = playerOf(s2)
+		if owner then
+			so.owner = owner.DisplayName or owner.Name
+		end
+		return so
+	end
+
+	local function playerInfo(p, myPos)
+		local char = p.Character
+		local root = char and char:FindFirstChild("HumanoidRootPart")
+		local hum = char and char:FindFirstChildOfClass("Humanoid")
+		if not (root and hum) then
+			return nil
+		end
+		local info = { name = p.Name, disp = p.DisplayName or p.Name, pos = root.Position }
+		if myPos then
+			info.dist = (root.Position - myPos).Magnitude
+		end
+		pcall(function()
+			info.state = hum:GetState().Name
+		end)
+		local tool = char:FindFirstChildOfClass("Tool")
+		if tool then
+			info.holding = tool.Name
+		end
+		local seat = hum.SeatPart
+		if seat then
+			local m = seat:FindFirstAncestorOfClass("Model")
+			info.sit = seat.Name .. ((m and m ~= char) and (" of " .. m.Name) or "")
+		else
+			pcall(function()
+				local rp = RaycastParams.new()
+				rp.FilterType = Enum.RaycastFilterType.Exclude
+				rp.FilterDescendantsInstances = { char }
+				local hit = workspace:Raycast(root.Position, Vector3.new(0, -7, 0), rp)
+				if hit and hit.Instance then
+					local m = hit.Instance:FindFirstAncestorOfClass("Model")
+					info.stand = hit.Instance.Name .. " (" .. tostring(hit.Material and hit.Material.Name or "?") .. ")" .. ((m and m ~= char) and (" in " .. m.Name) or "")
+				end
+			end)
+		end
+		pcall(function()
+			local animator = hum:FindFirstChildOfClass("Animator")
+			if animator then
+				local moves = movementIds(char)
+				local names = {}
+				for _, tr in ipairs(animator:GetPlayingAnimationTracks()) do
+					local id = assetId(tr.Animation and tr.Animation.AnimationId)
+					local pr = tr.Priority and tr.Priority.Name or ""
+					if id and not moves[id] and pr ~= "Core" and pr ~= "Idle" and pr ~= "Movement" then
+						names[#names + 1] = animName(id, tr.Animation)
+					end
+				end
+				if #names > 0 then
+					info.emote = table.concat(names, ", ")
+				end
+			end
+		end)
+		pcall(function()
+			info.pack = packOf(p, hum)
+		end)
+		for s2 in pairs(Idx.sound) do
+			if s2.IsPlaying and s2:IsDescendantOf(char) then
+				info.soundRaw = s2.SoundId
+				break
+			end
+		end
+		return info
+	end
+
+	------------------------------------------------------------ scan
+	World.snap = nil
+	local scanning = false
+	function World.scan()
+		if scanning and World.snap then
+			return World.snap
+		end
+		scanning = true
+		local snap = { t = os.clock(), players = {}, near = {}, prompts = {}, sounds = {}, npcs = {}, me = {} }
+		local root = myRoot()
+		local myPos = root and root.Position
+		pcall(function()
+			local hum = lp.Character and lp.Character:FindFirstChildOfClass("Humanoid")
+			if root then
+				snap.me.pos = root.Position
+			end
+			if hum then
+				pcall(function()
+					snap.me.state = hum:GetState().Name
+				end)
+				snap.me.hp = hum.Health
+				if hum.SeatPart then
+					snap.me.sit = hum.SeatPart.Name
+				end
+			end
+			local tool = lp.Character and lp.Character:FindFirstChildOfClass("Tool")
+			if tool then
+				snap.me.holding = tool.Name
+			end
+		end)
+		pcall(function()
+			for _, p in ipairs(Players:GetPlayers()) do
+				if p ~= lp then
+					local pi = playerInfo(p, myPos)
+					if pi then
+						snap.players[#snap.players + 1] = pi
+					end
+				end
+			end
+			table.sort(snap.players, function(a, b)
+				return (a.dist or 1e9) < (b.dist or 1e9)
+			end)
+		end)
+		if myPos then
+			pcall(function()
+				local op = OverlapParams.new()
+				op.FilterType = Enum.RaycastFilterType.Exclude
+				op.FilterDescendantsInstances = { lp.Character }
+				op.MaxParts = 250
+				local parts = workspace:GetPartBoundsInRadius(myPos, 110, op)
+				local groups = {}
+				for _, part in ipairs(parts) do
+					local top = part
+					while top.Parent and top.Parent ~= workspace do
+						top = top.Parent
+					end
+					if not playerOf(top) then
+						local g = groups[top]
+						local d = (part.Position - myPos).Magnitude
+						if not g then
+							g = { name = top.Name, class = top.ClassName, n = 0, dist = d, x = part.Position.X, z = part.Position.Z, obj = top }
+							groups[top] = g
+							snap.near[#snap.near + 1] = g
+						end
+						g.n = g.n + 1
+						if d < g.dist then
+							g.dist, g.x, g.z = d, part.Position.X, part.Position.Z
+						end
+					end
+				end
+				table.sort(snap.near, function(a, b)
+					return a.dist < b.dist
+				end)
+				while #snap.near > 10 do
+					table.remove(snap.near)
+				end
+				for _, g in ipairs(snap.near) do
+					pcall(function()
+						if g.obj:IsA("Model") then
+							local sz = g.obj:GetExtentsSize()
+							g.size = r0(sz.X) .. "x" .. r0(sz.Y) .. "x" .. r0(sz.Z)
+							if g.obj:FindFirstChildOfClass("Humanoid") then
+								snap.npcs[#snap.npcs + 1] = g
+							end
+						end
+					end)
+				end
+			end)
+		end
+		local function addInter(kind, set)
+			for inst in pairs(set) do
+				local p3 = posOf(inst)
+				if p3 and myPos then
+					local d = (p3 - myPos).Magnitude
+					if d <= 60 then
+						local text, nm = "", inst.Parent and inst.Parent.Name or "?"
+						if kind == "prompt" then
+							text = tostring(inst.ActionText or "")
+							if inst.ObjectText and inst.ObjectText ~= "" then
+								text = text .. " " .. inst.ObjectText
+							end
+						end
+						snap.prompts[#snap.prompts + 1] = { kind = kind, obj = inst, text = trimChars(trim(text), 40), name = nm, dist = d, pos = p3 }
+					end
+				end
+			end
+		end
+		pcall(function()
+			addInter("prompt", Idx.prompt)
+			addInter("click", Idx.click)
+			addInter("seat", Idx.seat)
+			table.sort(snap.prompts, function(a, b)
+				return a.dist < b.dist
+			end)
+			while #snap.prompts > 14 do
+				table.remove(snap.prompts)
+			end
+		end)
+		pcall(function()
+			for s2 in pairs(Idx.sound) do
+				if s2.IsPlaying and tostring(s2.SoundId) ~= "" then
+					local so = soundInfo(s2, myPos)
+					if not so.dist or so.dist < 250 then
+						snap.sounds[#snap.sounds + 1] = so
+					end
+				end
+			end
+			table.sort(snap.sounds, function(a, b)
+				return (a.dist or 0) < (b.dist or 0)
+			end)
+			while #snap.sounds > 6 do
+				table.remove(snap.sounds)
+			end
+		end)
+		World.snap = snap
+		scanning = false
+		return snap
+	end
+	function World.get(maxAge)
+		if World.snap and os.clock() - World.snap.t <= (maxAge or 5) then
+			return World.snap
+		end
+		return World.scan()
+	end
+
+	------------------------------------------------------------ text for the AI
+	local function playerLine(pi, withDist)
+		local bits = {}
+		if pi.sit then
+			bits[#bits + 1] = "sitting on " .. pi.sit
+		elseif pi.stand then
+			bits[#bits + 1] = "standing on " .. pi.stand
+		end
+		if pi.holding then
+			bits[#bits + 1] = "holding " .. pi.holding
+		end
+		if pi.emote then
+			bits[#bits + 1] = "emote: " .. pi.emote
+		end
+		if pi.pack and pi.pack ~= "default" then
+			bits[#bits + 1] = "animation pack: " .. pi.pack
+		end
+		if pi.soundRaw then
+			bits[#bits + 1] = 'playing audio "' .. (World.nameOf(pi.soundRaw) or ("audio id " .. tostring(assetId(pi.soundRaw) or "?"))) .. '"'
+		end
+		local head = pi.disp
+		if withDist and pi.dist then
+			head = head .. " (" .. r0(pi.dist) .. " studs" .. (pi.state and (", " .. pi.state:lower()) or "") .. ")"
+		end
+		return head .. ": " .. (#bits > 0 and table.concat(bits, "; ") or "nothing special")
+	end
+
+	function World.about(p)
+		if not cfg.WorldSight then
+			return nil
+		end
+		local snap = World.get(5)
+		for _, pi in ipairs(snap.players) do
+			if pi.name == p.Name then
+				return playerLine(pi, false)
+			end
+		end
+		return nil
+	end
+
+	function World.describe(opts)
+		opts = opts or {}
+		local snap = World.get(opts.maxAge or 5)
+		local L = {}
+		local gname = World.gameName()
+		L[#L + 1] = "Game: " .. gname
+		local me = snap.me
+		if me.pos then
+			L[#L + 1] = "You are at (" .. r0(me.pos.X) .. "," .. r0(me.pos.Y) .. "," .. r0(me.pos.Z) .. ")" .. (me.state and (", " .. me.state:lower()) or "") .. (me.holding and (", holding " .. me.holding) or "") .. (me.sit and (", sitting on " .. me.sit) or "")
+		end
+		if cfg.WorldSight then
+			if #snap.players > 0 then
+				L[#L + 1] = "Players:"
+				for i, pi in ipairs(snap.players) do
+					if i > 8 then
+						break
+					end
+					L[#L + 1] = "- " .. playerLine(pi, true)
+				end
+			end
+			if #snap.near > 0 then
+				local b = {}
+				for _, g in ipairs(snap.near) do
+					b[#b + 1] = g.name .. " (" .. g.class .. ", " .. g.n .. " parts, " .. r0(g.dist) .. " studs" .. (g.size and (", " .. g.size) or "") .. ")"
+				end
+				L[#L + 1] = "Nearby buildings and objects: " .. table.concat(b, "; ")
+			end
+			if #snap.npcs > 0 then
+				local b = {}
+				for _, g in ipairs(snap.npcs) do
+					b[#b + 1] = g.name
+				end
+				L[#L + 1] = "NPCs: " .. table.concat(b, ", ")
+			end
+			if #snap.prompts > 0 then
+				local b = {}
+				for _, pr in ipairs(snap.prompts) do
+					b[#b + 1] = (pr.kind == "prompt" and ('prompt "' .. pr.text .. '" on ') or (pr.kind == "click" and "clickable " or "seat ")) .. pr.name .. " (" .. r0(pr.dist) .. ")"
+				end
+				L[#L + 1] = "Things you can interact with: " .. table.concat(b, "; ")
+			end
+		end
+		if cfg.WorldHear and #snap.sounds > 0 then
+			local b = {}
+			for _, so in ipairs(snap.sounds) do
+				b[#b + 1] = '"' .. (so.title or World.nameOf(so.id) or ("audio id " .. tostring(assetId(so.id) or "?"))) .. '"' .. (so.owner and (" from " .. so.owner) or "") .. (so.dist and (", " .. r0(so.dist) .. " studs away") or ", global") .. ", volume " .. string.format("%.1f", so.vol)
+			end
+			L[#L + 1] = "Sounds you hear: " .. table.concat(b, "; ")
+		end
+		return trimChars(table.concat(L, "\n"), opts.budget or 1200)
+	end
+
+	-- paths of real objects, handy for writing scripts
+	function World.paths()
+		local snap = World.get(10)
+		local out = {}
+		for _, pr in ipairs(snap.prompts) do
+			if #out < 10 then
+				local ok, fn = pcall(function()
+					return pr.obj:GetFullName()
+				end)
+				if ok then
+					out[#out + 1] = pr.kind .. ": " .. fn
+				end
+			end
+		end
+		for _, g in ipairs(snap.near) do
+			if #out < 16 then
+				local ok, fn = pcall(function()
+					return g.obj:GetFullName()
+				end)
+				if ok then
+					out[#out + 1] = g.class .. ": " .. fn
+				end
+			end
+		end
+		return out
+	end
+
+	local WQ = { "see", "look", "around", "hear", "listen", "music", "song", "playing", "holding", "hold", "wearing", "sitting", "sit", "standing", "stand", "dance", "dancing", "emote", "animation", "building", "map", "game", "near", "boombox", "radio", "audio", "sound", "who", "where", "doing", "tool", "item" }
+	function World.isWorldQuestion(text)
+		local l = " " .. normText(text) .. " "
+		for _, w in ipairs(WQ) do
+			if l:find(" " .. w .. " ", 1, true) then
+				return true
+			end
+		end
+		return false
+	end
+
+	function World.chatBlock(items)
+		if not (cfg.WorldSight or cfg.WorldHear) then
+			return nil
+		end
+		local parts, ask, seen, kws = {}, false, {}, {}
+		for _, it in ipairs(items) do
+			if World.isWorldQuestion(it.cleaned) then
+				ask = true
+			end
+			for _, w in ipairs(keywords(it.cleaned).list) do
+				kws[#kws + 1] = w
+			end
+			if not seen[it.p.Name] then
+				seen[it.p.Name] = true
+				local a = World.about(it.p)
+				if a then
+					parts[#parts + 1] = "About the speaker: " .. a
+				end
+			end
+		end
+		if ask then
+			parts[#parts + 1] = World.describe({ budget = 900 })
+			local n = World.notes()
+			if n ~= "" then
+				parts[#parts + 1] = "Game notes: " .. n
+			end
+			for _, e in ipairs(World.search(kws, 3)) do
+				parts[#parts + 1] = "Remembered: " .. e.m
+			end
+		end
+		if #parts == 0 then
+			return nil
+		end
+		return table.concat(parts, "\n")
+	end
+
+	------------------------------------------------------------ world memory: sharded files, one folder per game, practically unlimited
+	local SEG = 400
+	local W = { idx = nil, tail = {}, recent = {}, dirty = false }
+	local Wmeta = {}
+	local SegCache, SegOrder = {}, {}
+	local function pkey()
+		return tostring(game.PlaceId or 0)
+	end
+	local function wpath(f)
+		return "world/" .. pkey() .. "/" .. f
+	end
+	local function loadStore()
+		if W.idx then
+			return
+		end
+		if hasFS then
+			ensureDir(DIR)
+			ensureDir(DIR .. "/world")
+			ensureDir(DIR .. "/world/" .. pkey())
+		end
+		local idx = readJson(wpath("index.json"), nil)
+		W.idx = type(idx) == "table" and idx or {}
+		W.idx.count = tonumber(W.idx.count) or 0
+		W.idx.seg = tonumber(W.idx.seg) or 1
+		local tail = readJson(wpath("seg_" .. W.idx.seg .. ".json"), {})
+		W.tail = type(tail) == "table" and tail or {}
+		for i = math.max(1, #W.tail - 59), #W.tail do
+			W.recent[#W.recent + 1] = W.tail[i]
+		end
+		local m = readJson("world/meta.json", nil)
+		Wmeta = type(m) == "table" and m or {}
+		Wmeta.total = tonumber(Wmeta.total) or 0
+	end
+
+	function World.flush(force)
+		if not W.idx or not (W.dirty or force) then
+			return
+		end
+		writeJson(wpath("seg_" .. W.idx.seg .. ".json"), W.tail)
+		writeJson(wpath("index.json"), W.idx)
+		writeJson("world/meta.json", Wmeta)
+		W.dirty = false
+	end
+
+	function World.add(kind, text, extra)
+		loadStore()
+		local e = { t = os.time(), k = kind, m = trimChars(text, 220) }
+		if extra then
+			for k, v in pairs(extra) do
+				e[k] = v
+			end
+		end
+		W.tail[#W.tail + 1] = e
+		W.recent[#W.recent + 1] = e
+		if #W.recent > 60 then
+			table.remove(W.recent, 1)
+		end
+		W.idx.count = W.idx.count + 1
+		Wmeta.total = Wmeta.total + 1
+		W.dirty = true
+		if #W.tail >= SEG then
+			World.flush()
+			W.idx.seg = W.idx.seg + 1
+			W.tail = {}
+			W.dirty = true
+		end
+		if W.idx.count > CAP_WORLD then -- forget the oldest file of this game
+			local f = tonumber(W.idx.first) or 1
+			if f < W.idx.seg then
+				if delfile then
+					pcall(delfile, DIR .. "/" .. wpath("seg_" .. f .. ".json"))
+				else
+					writeJson(wpath("seg_" .. f .. ".json"), {})
+				end
+				W.idx.first = f + 1
+				W.idx.count = W.idx.count - SEG
+			end
+		end
+		return e
+	end
+
+	function World.stats()
+		loadStore()
+		return W.idx.count, Wmeta.total
+	end
+	function World.recentLines(n)
+		loadStore()
+		local out = {}
+		for i = #W.recent, math.max(1, #W.recent - n + 1), -1 do
+			local e = W.recent[i]
+			out[#out + 1] = os.date("%H:%M", e.t or 0) .. "  " .. tostring(e.m)
+		end
+		return out
+	end
+
+	local function segRead(n)
+		if SegCache[n] then
+			return SegCache[n]
+		end
+		local d = readJson(wpath("seg_" .. n .. ".json"), {})
+		SegCache[n] = d
+		SegOrder[#SegOrder + 1] = n
+		if #SegOrder > 4 then
+			SegCache[table.remove(SegOrder, 1)] = nil
+		end
+		return d
+	end
+
+	-- looks through the newest part of this game's memory (recent files are loaded on demand)
+	function World.search(kws, n)
+		loadStore()
+		if #kws == 0 then
+			return {}
+		end
+		local res = {}
+		local function scan(list)
+			for i = #list, 1, -1 do
+				local e = list[i]
+				if type(e) == "table" and e.m then
+					local low, hit = e.m:lower(), 0
+					for _, w in ipairs(kws) do
+						if low:find(w, 1, true) then
+							hit = hit + 1
+						end
+					end
+					if hit >= math.min(2, #kws) then
+						res[#res + 1] = { e = e, s = hit }
+					end
+				end
+			end
+		end
+		scan(W.tail)
+		for sg = W.idx.seg - 1, math.max(tonumber(W.idx.first) or 1, W.idx.seg - 4), -1 do
+			scan(segRead(sg))
+		end
+		table.sort(res, function(a, b)
+			if a.s ~= b.s then
+				return a.s > b.s
+			end
+			return (a.e.t or 0) > (b.e.t or 0)
+		end)
+		local out = {}
+		for i = 1, math.min(n or 3, #res) do
+			out[i] = res[i].e
+		end
+		return out
+	end
+
+	function World.wipe()
+		loadStore()
+		local first = tonumber(W.idx.first) or 1
+		for sg = first, W.idx.seg do
+			writeJson(wpath("seg_" .. sg .. ".json"), {})
+		end
+		Wmeta.total = math.max(0, Wmeta.total - W.idx.count)
+		W.idx = { count = 0, seg = 1 }
+		W.tail, W.recent, SegCache, SegOrder = {}, {}, {}, {}
+		W.dirty = true
+		World.flush(true)
+	end
+
+	------------------------------------------------------------ what the AI learns about each game
+	local Notes
+	local function loadNotes()
+		if Notes == nil then
+			loadStore()
+			local n = readJson(wpath("notes.json"), {})
+			Notes = type(n) == "table" and n or {}
+			Notes.text = tostring(Notes.text or "")
+		end
+	end
+	function World.notes()
+		loadNotes()
+		return Notes.text
+	end
+	function World.notesInfo()
+		loadNotes()
+		return Notes
+	end
+
+	local function guiText(o)
+		local t = ""
+		if o:IsA("TextButton") then
+			t = o.Text
+		end
+		if t == "" then
+			for _, d in ipairs(o:GetDescendants()) do
+				if d:IsA("TextLabel") and d.Text ~= "" then
+					t = d.Text
+					break
+				end
+			end
+		end
+		return trimChars(oneLine(t), 40)
+	end
+	local function visibleChain(o)
+		local x = o
+		while x and not x:IsA("ScreenGui") do
+			if x:IsA("GuiObject") and not x.Visible then
+				return false
+			end
+			x = x.Parent
+		end
+		return x == nil or x.Enabled ~= false
+	end
+	function World.guiButtons(max)
+		local out = {}
+		local pg = lp:FindFirstChildOfClass("PlayerGui")
+		if not pg then
+			return out
+		end
+		local inset = insetY()
+		pcall(function()
+			for _, d in ipairs(pg:GetDescendants()) do
+				if d:IsA("GuiButton") and not (World.ownGui and d:IsDescendantOf(World.ownGui)) and visibleChain(d) then
+					local sz, ps = d.AbsoluteSize, d.AbsolutePosition
+					if sz.X > 4 and sz.Y > 4 then
+						local sg = d:FindFirstAncestorOfClass("ScreenGui")
+						local off = (sg and sg.IgnoreGuiInset) and 0 or inset
+						out[#out + 1] = { obj = d, text = guiText(d), x = ps.X + sz.X / 2, y = ps.Y + sz.Y / 2 + off, area = sz.X * sz.Y }
+					end
+				end
+			end
+		end)
+		table.sort(out, function(a, b)
+			return a.area > b.area
+		end)
+		while #out > (max or 25) do
+			table.remove(out)
+		end
+		return out
+	end
+	function World.guiSummary()
+		local b = {}
+		for _, g in ipairs(World.guiButtons(15)) do
+			if g.text ~= "" then
+				b[#b + 1] = g.text
+			end
+		end
+		return table.concat(b, ", ")
+	end
+
+	local NOTES_SYS = "You write compact field notes about a Roblox game for an AI companion. From the observations write at most 800 characters of plain text: what kind of game it is, how it works, what players do, the key objects, buttons and places, and tips for interacting. No markdown."
+	function World.learn()
+		loadStore()
+		loadNotes()
+		local name, desc = World.gameName()
+		local ctx = World.describe({ budget = 1600, maxAge = 0 })
+		local rec = {}
+		for i = math.max(1, #W.recent - 24), #W.recent do
+			rec[#rec + 1] = W.recent[i].m
+		end
+		local text, err = askRaw(NOTES_SYS, "Game: " .. name .. "\nDescription: " .. trimChars(desc, 400) .. "\n\nAround now:\n" .. ctx .. "\n\nVisible buttons: " .. World.guiSummary() .. "\n\nRecent events:\n" .. table.concat(rec, "\n"), 400, "world")
+		if not text then
+			return false, err
+		end
+		Notes = { text = trimChars(text, 900), at = os.time(), evs = W.idx.count }
+		writeJson(wpath("notes.json"), Notes)
+		World.add("note", "Learned about this game: " .. trimChars(text, 120))
+		return true, text
+	end
+
+	------------------------------------------------------------ watching: turns scans into memories
+	local last = { hold = {}, sit = {}, emote = {}, pack = {}, snd = {}, pend = {}, seen = {} }
+	local seenCount = 0
+	local function tick()
+		local snap = World.scan()
+		if cfg.WorldSight then
+			for _, pi in ipairs(snap.players) do
+				local n, id = pi.disp, pi.name
+				local h = pi.holding or ""
+				if (last.hold[id] or "") ~= h then
+					if h ~= "" then
+						World.add("player", n .. " is holding " .. h)
+					elseif last.hold[id] then
+						World.add("player", n .. " put away " .. last.hold[id])
+					end
+					last.hold[id] = h
+				end
+				local sit = pi.sit or ""
+				if (last.sit[id] or "") ~= sit then
+					if sit ~= "" then
+						World.add("player", n .. " sat on " .. sit)
+					elseif last.sit[id] and last.sit[id] ~= "" then
+						World.add("player", n .. " stood up")
+					end
+					last.sit[id] = sit
+				end
+				local em = pi.emote or ""
+				local young = function(key)
+					last.pend[key] = last.pend[key] or os.clock()
+					return os.clock() - last.pend[key] < 10
+				end
+				if (last.emote[id] or "") ~= em and not (em:find("animation %d") and young("e" .. id)) then
+					if em ~= "" then
+						World.add("player", n .. " is doing emote: " .. em)
+					end
+					last.emote[id] = em
+				end
+				local pck = pi.pack or ""
+				if pck ~= "" and last.pack[id] ~= pck and not (pck:find("^custom pack") and young("p" .. id)) then
+					World.add("player", n .. " uses animation pack: " .. pck)
+					last.pack[id] = pck
+				end
+			end
+			for _, g in ipairs(snap.near) do
+				local key = g.name .. ":" .. math.floor(g.x / 30) .. ":" .. math.floor(g.z / 30)
+				if not last.seen[key] and seenCount < 800 then
+					last.seen[key] = true
+					seenCount = seenCount + 1
+					World.add("place", "Saw " .. g.name .. " (" .. g.class .. (g.size and (", " .. g.size) or "") .. ") near (" .. r0(g.x) .. "," .. r0(g.z) .. ")")
+				end
+			end
+			for _, pr in ipairs(snap.prompts) do
+				local key = pr.kind .. pr.name .. ":" .. pr.text
+				if not last.seen[key] and seenCount < 800 then
+					last.seen[key] = true
+					seenCount = seenCount + 1
+					World.add("object", "Found " .. (pr.kind == "prompt" and ('prompt "' .. pr.text .. '"') or pr.kind) .. " on " .. pr.name .. " (" .. r0(pr.dist) .. " studs)")
+				end
+			end
+		end
+		if cfg.WorldHear then
+			local cur = {}
+			for _, so in ipairs(snap.sounds) do
+				cur[so.inst] = true
+				if not last.snd[so.inst] then
+					if so.title or (last.pend[so.inst] and os.clock() - last.pend[so.inst] > 12) then
+						last.snd[so.inst] = true
+						World.add("sound", 'Heard "' .. (so.title or ("audio id " .. tostring(assetId(so.id) or "?"))) .. '"' .. (so.owner and (" from " .. so.owner) or "") .. (so.dist and (" about " .. r0(so.dist) .. " studs away") or " (global)"))
+					else
+						last.pend[so.inst] = last.pend[so.inst] or os.clock()
+					end
+				end
+			end
+			for inst in pairs(last.snd) do
+				if not cur[inst] then
+					last.snd[inst] = nil
+					last.pend[inst] = nil
+				end
+			end
+		end
+	end
+
+	local started, learning = false, false
+	function World.start()
+		if started then
+			return
+		end
+		started = true
+		task.spawn(function()
+			local ok, all = pcall(function()
+				return workspace:GetDescendants()
+			end)
+			if ok then
+				for i, d in ipairs(all) do
+					if not Alive then
+						return
+					end
+					pcall(reg, d)
+					if i % 1500 == 0 then
+						task.wait()
+					end
+				end
+			end
+		end)
+		track(workspace.DescendantAdded:Connect(function(d)
+			pcall(reg, d)
+		end))
+		track(workspace.DescendantRemoving:Connect(function(d)
+			Idx.sound[d], Idx.prompt[d], Idx.click[d], Idx.seat[d] = nil, nil, nil, nil
+		end))
+	end
+	-- sensing loop (cheap when everything is off)
+	task.spawn(function()
+		while Alive do
+			task.wait(6)
+			if cfg.WorldSight or cfg.WorldHear then
+				World.start()
+				pcall(tick)
+				if cfg.WorldSight and not learning and #Keys.active() > 0 then
+					loadNotes()
+					local due = (Notes.at == nil and os.clock() > 25) or (W.idx.count - (Notes.evs or 0) >= 80 and os.time() - (Notes.at or 0) > 1200)
+					if due then
+						learning = true
+						task.spawn(function()
+							pcall(World.learn)
+							learning = false
+						end)
+					end
+				end
+			end
+			World.flush()
+		end
+	end)
+
+	------------------------------------------------------------ virtual mouse
+	local VIM = svc("VirtualInputManager")
+	local M = { x = 200, y = 200, offY = 0, engine = nil, stop = false, running = false, log = {}, pending = nil, byId = {} }
+	World.mouse = M
+	M.profile = readJson("mouse_profile.json", nil)
+	if type(M.profile) ~= "table" then
+		M.profile = {}
+	end
+	if type(M.profile.skills) ~= "table" then
+		M.profile.skills = {}
+	end
+	if M.profile.engine ~= nil then
+		M.engine = M.profile.engine and true or false
+	end
+	M.offY = tonumber(M.profile.offY) or 0
+	local function saveProfile()
+		writeJson("mouse_profile.json", M.profile)
+	end
+	local function mlog(msg)
+		M.log[#M.log + 1] = msg
+		while #M.log > 12 do
+			table.remove(M.log, 1)
+		end
+		status(msg)
+		if M.onLog then
+			pcall(M.onLog)
+		end
+	end
+	local function viewport()
+		local c = cam()
+		return c and c.ViewportSize or Vector2.new(800, 400)
+	end
+
+	function M.attach(gui, win, fab)
+		M.gui, M.win, M.fab = gui, win, fab
+		World.ownGui = gui
+		local c
+		if Icons.pointer then
+			c = Instance.new("ImageLabel")
+			c.Image = Icons.pointer
+			c.BackgroundTransparency = 1
+			c.ScaleType = Enum.ScaleType.Fit
+		else
+			c = Instance.new("Frame")
+			c.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+		end
+		c.Name = "VirtualMouse"
+		c.Size = UDim2.fromOffset(22, 22)
+		c.AnchorPoint = Vector2.new(0.1, 0.1)
+		c.ZIndex = 200
+		c.Active = false
+		c.Position = UDim2.fromOffset(M.x, M.y)
+		c.Visible = cfg.CursorVisible and cfg.MouseMode ~= "Off"
+		c.Parent = gui
+		M.cursor = c
+	end
+	function M.refreshCursor()
+		if M.cursor then
+			M.cursor.Visible = cfg.CursorVisible and cfg.MouseMode ~= "Off"
+		end
+	end
+
+	-- the AI may never touch its own window, Roblox's menus, or anything that spends Robux
+	local RISK = { "buy", "purchase", "robux", "r%$", "gamepass", "game pass", "premium", "subscribe", "donate", "checkout", "pay " }
+	local function riskyText(t)
+		t = " " .. tostring(t):lower() .. " "
+		for _, w in ipairs(RISK) do
+			if t:find(w) then
+				return true
+			end
+		end
+		return false
+	end
+	local function riskyGui(o)
+		local ok, res = pcall(function()
+			local t = o.Name
+			if o:IsA("TextButton") or o:IsA("TextLabel") then
+				t = t .. " " .. o.Text
+			end
+			if riskyText(t) then
+				return true
+			end
+			local n = 0
+			for _, d in ipairs(o:GetDescendants()) do
+				n = n + 1
+				if n > 10 then
+					break
+				end
+				if (d:IsA("TextLabel") or d:IsA("TextButton")) and riskyText(d.Text) then
+					return true
+				end
+			end
+			return false
+		end)
+		return ok and res
+	end
+	M.riskyText = riskyText
+	local function rectHas(obj, x, y)
+		if not obj or not obj.Visible then
+			return false
+		end
+		local p, s2 = obj.AbsolutePosition, obj.AbsoluteSize
+		return x >= p.X and x <= p.X + s2.X and y >= p.Y and y <= p.Y + s2.Y
+	end
+	function M.safeAt(x, y)
+		if rectHas(M.win, x, y) or rectHas(M.fab, x, y) then
+			return false, "that spot is my own window"
+		end
+		local inset = insetY()
+		if y < inset then
+			return false, "that is the Roblox top bar"
+		end
+		local blocked, why
+		pcall(function()
+			if CoreGui then
+				for _, yy in ipairs({ y, y - inset }) do
+					local ok, objs = pcall(function()
+						return CoreGui:GetGuiObjectsAtPosition(x, yy)
+					end)
+					if ok and type(objs) == "table" then
+						for _, o in ipairs(objs) do
+							local mine = M.gui and o:IsDescendantOf(M.gui)
+							if not mine and o.Visible and (o:IsA("GuiButton") or o:IsA("TextBox") or o.Active or o.BackgroundTransparency < 0.95) then
+								blocked, why = true, "that is Roblox's own menu (blocked for safety)"
+								return
+							end
+						end
+					end
+				end
+			end
+			local pg = lp:FindFirstChildOfClass("PlayerGui")
+			if pg then
+				for _, yy in ipairs({ y, y - inset }) do
+					local ok, objs = pcall(function()
+						return pg:GetGuiObjectsAtPosition(x, yy)
+					end)
+					if ok and type(objs) == "table" then
+						for _, o in ipairs(objs) do
+							if riskyGui(o) then
+								blocked, why = true, "that looks like a purchase button"
+								return
+							end
+						end
+					end
+				end
+			end
+		end)
+		if blocked then
+			return false, why
+		end
+		return true
+	end
+
+	-- cursor movement (the picture and, if the executor allows it, the real engine mouse)
+	function M.setPos(x, y)
+		M.x, M.y = x, y
+		if M.cursor then
+			M.cursor.Position = UDim2.fromOffset(x, y)
+		end
+		if VIM and M.engine ~= false then
+			pcall(function()
+				VIM:SendMouseMoveEvent(x, y + M.offY, game)
+			end)
+		end
+	end
+	function M.moveTo(x, y, dur)
+		local vp = viewport()
+		x, y = math.clamp(x, 0, vp.X - 1), math.clamp(y, 0, vp.Y - 1)
+		local sx, sy = M.x, M.y
+		dur = dur or math.clamp(math.sqrt((x - sx) ^ 2 + (y - sy) ^ 2) / 900, 0.12, 0.7)
+		local steps = math.max(2, math.floor(dur / 0.05))
+		for i = 1, steps do
+			local a = i / steps
+			a = a * a * (3 - 2 * a)
+			M.setPos(sx + (x - sx) * a, sy + (y - sy) * a)
+			task.wait(dur / steps)
+		end
+		M.setPos(x, y)
+	end
+
+	local function fireBtn(btn)
+		local fired = false
+		if type(firesignal) == "function" then
+			for _, nm in ipairs({ "MouseButton1Down", "MouseButton1Up", "MouseButton1Click", "Activated" }) do
+				local sig = btn[nm]
+				if sig and pcall(firesignal, sig) then
+					fired = true
+				end
+			end
+		elseif type(getconnections) == "function" then
+			pcall(function()
+				for _, c in ipairs(getconnections(btn.MouseButton1Click)) do
+					c:Fire()
+					fired = true
+				end
+			end)
+		end
+		return fired
+	end
+
+	-- a real click at the cursor; falls back to direct firing when the engine mouse is unavailable
+	function M.click(button)
+		local ok, why = M.safeAt(M.x, M.y)
+		if not ok then
+			return false, why
+		end
+		local b = (button == "right") and 1 or 0
+		if VIM and M.engine ~= false then
+			local sent = pcall(function()
+				VIM:SendMouseButtonEvent(M.x, M.y + M.offY, b, true, game, 0)
+				task.wait(0.06)
+				VIM:SendMouseButtonEvent(M.x, M.y + M.offY, b, false, game, 0)
+			end)
+			if sent then
+				return true, "engine"
+			end
+		end
+		-- fallback: find what is under the cursor and fire it directly
+		local pg = lp:FindFirstChildOfClass("PlayerGui")
+		local inset = insetY()
+		if pg then
+			for _, yy in ipairs({ M.y, M.y - inset }) do
+				local okq, objs = pcall(function()
+					return pg:GetGuiObjectsAtPosition(M.x, yy)
+				end)
+				if okq and type(objs) == "table" then
+					for _, o in ipairs(objs) do
+						if o:IsA("GuiButton") and fireBtn(o) then
+							return true, "fire"
+						end
+					end
+				end
+			end
+		end
+		local c = cam()
+		local okr = pcall(function()
+			local ray = c:ViewportPointToRay(M.x, M.y)
+			local rp = RaycastParams.new()
+			rp.FilterType = Enum.RaycastFilterType.Exclude
+			rp.FilterDescendantsInstances = { lp.Character }
+			local hit = workspace:Raycast(ray.Origin, ray.Direction * 500, rp)
+			if hit and hit.Instance then
+				local x2 = hit.Instance
+				for _ = 1, 4 do
+					if not x2 then
+						break
+					end
+					local cd = x2:FindFirstChildOfClass("ClickDetector")
+					if cd and fireclickdetector then
+						fireclickdetector(cd)
+						error("done")
+					end
+					local pp = x2:FindFirstChildOfClass("ProximityPrompt")
+					if pp and fireproximityprompt then
+						fireproximityprompt(pp)
+						error("done")
+					end
+					x2 = x2.Parent
+				end
+			end
+		end)
+		if not okr then
+			return true, "fire"
+		end
+		local tool = lp.Character and lp.Character:FindFirstChildOfClass("Tool")
+		if tool then
+			pcall(function()
+				tool:Activate()
+			end)
+			return true, "tool"
+		end
+		return false, "nothing to click there"
+	end
+
+	function M.scroll(n)
+		if VIM and M.engine ~= false then
+			for _ = 1, math.min(10, math.abs(n)) do
+				pcall(function()
+					VIM:SendMouseWheelEvent(M.x, M.y + M.offY, n > 0, game)
+				end)
+				task.wait(0.05)
+			end
+			return true
+		end
+		return false
+	end
+
+	-- things the AI can point at; ids like g1 (screen button), p1 (prompt), c1 (clickable), s1 (seat)
+	function M.targets()
+		local list, byId, n = {}, {}, { g = 0, p = 0, c = 0, s = 0 }
+		local function add(pre, t)
+			n[pre] = n[pre] + 1
+			t.id = pre .. n[pre]
+			list[#list + 1] = t
+			byId[t.id] = t
+		end
+		for _, g in ipairs(World.guiButtons(14)) do
+			add("g", { kind = "button", obj = g.obj, label = g.text ~= "" and g.text or g.obj.Name, x = g.x, y = g.y })
+		end
+		local snap = World.get(2)
+		for _, pr in ipairs(snap.prompts) do
+			local pre = pr.kind == "prompt" and "p" or (pr.kind == "click" and "c" or "s")
+			add(pre, { kind = pr.kind, obj = pr.obj, label = ((pr.kind == "prompt" and pr.text ~= "") and pr.text or pr.kind) .. " on " .. pr.name, dist = pr.dist, pos = pr.pos })
+		end
+		M.byId = byId
+		return list
+	end
+	function M.screenOf(t)
+		if t.x then
+			return t.x, t.y
+		end
+		local ok, v, on = pcall(function()
+			return cam():WorldToViewportPoint(t.pos)
+		end)
+		if ok and on and v.Z > 0 then
+			return v.X, v.Y
+		end
+		return nil
+	end
+
+	function M.observe()
+		local vp = viewport()
+		local L = { "Screen " .. r0(vp.X) .. "x" .. r0(vp.Y) .. ". Cursor at (" .. r0(M.x) .. "," .. r0(M.y) .. ")." }
+		pcall(function()
+			local tgt = lp:GetMouse().Target
+			if tgt then
+				L[#L + 1] = "Under the cursor: " .. tgt.Name
+			end
+		end)
+		L[#L + 1] = "Targets (use these ids):"
+		for _, t in ipairs(M.targets()) do
+			local sx, sy = M.screenOf(t)
+			L[#L + 1] = "  " .. t.id .. " " .. t.kind .. ' "' .. t.label .. '"' .. (t.dist and (" " .. r0(t.dist) .. " studs") or "") .. (sx and (" at (" .. r0(sx) .. "," .. r0(sy) .. ")") or " off-screen")
+		end
+		L[#L + 1] = World.describe({ budget = 600, maxAge = 2 })
+		return table.concat(L, "\n")
+	end
+
+	local function stateOf()
+		local st = { btn = {}, snd = 0, tool = "" }
+		local r = myRoot()
+		if r then
+			st.pos = r.Position
+		end
+		local hum = lp.Character and lp.Character:FindFirstChildOfClass("Humanoid")
+		if hum then
+			st.hp = hum.Health
+		end
+		local tool = lp.Character and lp.Character:FindFirstChildOfClass("Tool")
+		st.tool = tool and tool.Name or ""
+		for _, g in ipairs(World.guiButtons(40)) do
+			if g.text ~= "" then
+				st.btn[g.text] = true
+			end
+		end
+		for s2 in pairs(Idx.sound) do
+			if s2.IsPlaying then
+				st.snd = st.snd + 1
+			end
+		end
+		return st
+	end
+	local function diff(a, b)
+		local bits = {}
+		if a.pos and b.pos and (a.pos - b.pos).Magnitude > 1.5 then
+			bits[#bits + 1] = "moved " .. r0((a.pos - b.pos).Magnitude) .. " studs"
+		end
+		if a.tool ~= b.tool then
+			bits[#bits + 1] = "now holding " .. (b.tool ~= "" and b.tool or "nothing")
+		end
+		if a.hp and b.hp and math.abs(a.hp - b.hp) > 0.5 then
+			bits[#bits + 1] = "health " .. r0(a.hp) .. " to " .. r0(b.hp)
+		end
+		local new, gone = {}, {}
+		for t in pairs(b.btn) do
+			if not a.btn[t] then
+				new[#new + 1] = t
+			end
+		end
+		for t in pairs(a.btn) do
+			if not b.btn[t] then
+				gone[#gone + 1] = t
+			end
+		end
+		if #new > 0 then
+			bits[#bits + 1] = "new buttons: " .. table.concat(new, ", ", 1, math.min(#new, 4))
+		end
+		if #gone > 0 then
+			bits[#bits + 1] = "buttons gone: " .. table.concat(gone, ", ", 1, math.min(#gone, 4))
+		end
+		if a.snd ~= b.snd then
+			bits[#bits + 1] = "sounds playing " .. a.snd .. " to " .. b.snd
+		end
+		if #bits == 0 then
+			return "no visible change", false
+		end
+		return table.concat(bits, "; "), true
+	end
+
+	local function learnFrom(kind, label, method, outcome, ok)
+		local key = kind .. ":" .. method
+		local sk = M.profile.skills[key] or { ok = 0, n = 0 }
+		sk.n = sk.n + 1
+		if ok then
+			sk.ok = sk.ok + 1
+		end
+		M.profile.skills[key] = sk
+		saveProfile()
+		World.add("mouse", ("Mouse: %s on %s via %s -> %s"):format(kind, label, method, outcome))
+	end
+	function M.skillsText()
+		local out = {}
+		for k, v in pairs(M.profile.skills) do
+			out[#out + 1] = k .. " " .. v.ok .. "/" .. v.n
+		end
+		table.sort(out)
+		return #out > 0 and table.concat(out, ", ") or "none yet"
+	end
+
+	local function walkTo(pos)
+		local hum = lp.Character and lp.Character:FindFirstChildOfClass("Humanoid")
+		if not hum then
+			return false
+		end
+		hum:MoveTo(pos)
+		local t0 = os.clock()
+		local r = myRoot()
+		while r and os.clock() - t0 < 5 and (r.Position - pos).Magnitude > 4 do
+			task.wait(0.25)
+		end
+		return true
+	end
+
+	-- do one action; returns a sentence describing what happened
+	function M.act(a)
+		local d = tostring(a["do"] or a.action or ""):lower()
+		local alias = { leftclick = "click", left = "click", rightclick = "rightclick", right = "rightclick", doubleclick = "doubleclick", double = "doubleclick", move = "move", hover = "move", drag = "drag", scroll = "scroll", wait = "wait", face = "face", walk = "walk", interact = "click", press = "click", use = "click" }
+		d = alias[d] or d
+		local tgt = a.target and M.byId[tostring(a.target)] or nil
+		if a.target and not tgt then
+			return "unknown target " .. tostring(a.target)
+		end
+		local x, y = tonumber(a.x), tonumber(a.y)
+		if tgt then
+			if M.riskyText(tgt.label) or (tgt.obj and riskyGui(tgt.obj) and tgt.kind == "button") then
+				return "refused: " .. tgt.label .. " looks like something that costs Robux"
+			end
+			x, y = M.screenOf(tgt)
+		end
+		if d == "wait" then
+			task.wait(math.clamp(tonumber(a.seconds) or 1, 0.2, 5))
+			return "waited"
+		end
+		if d == "walk" then
+			local pos = tgt and (tgt.pos or (tgt.obj and posOf(tgt.obj)))
+			if not pos then
+				return "walk needs a world target"
+			end
+			walkTo(pos)
+			return "walked toward " .. tgt.label
+		end
+		if d == "face" then
+			local pos = tgt and tgt.pos
+			if not pos then
+				return "face needs a world target"
+			end
+			pcall(function()
+				local c = cam()
+				c.CFrame = CFrame.lookAt(c.CFrame.Position, pos)
+			end)
+			return "turned the camera toward " .. tgt.label
+		end
+		if d == "scroll" then
+			if x and y then
+				M.moveTo(x, y)
+			end
+			local ok = M.scroll(tonumber(a.amount) or 3)
+			return ok and "scrolled" or "scroll isn't supported here"
+		end
+		if not x then
+			return tgt and (tgt.label .. " is off-screen, try face or walk first") or "no position given"
+		end
+		if d == "move" then
+			local ok, why = M.safeAt(x, y)
+			if not ok then
+				return "refused: " .. why
+			end
+			M.moveTo(x, y)
+			return "moved the cursor to (" .. r0(x) .. "," .. r0(y) .. ")"
+		end
+		if d == "drag" then
+			local x2, y2 = tonumber(a.to_x), tonumber(a.to_y)
+			if not (x2 and y2) then
+				return "drag needs to_x and to_y"
+			end
+			local ok1 = M.safeAt(x, y)
+			local ok2 = M.safeAt(x2, y2)
+			if not (ok1 and ok2) then
+				return "refused: that drag touches a protected area"
+			end
+			M.moveTo(x, y)
+			if VIM then
+				pcall(function()
+					VIM:SendMouseButtonEvent(M.x, M.y + M.offY, 0, true, game, 0)
+				end)
+				M.moveTo(x2, y2, 0.5)
+				pcall(function()
+					VIM:SendMouseButtonEvent(M.x, M.y + M.offY, 0, false, game, 0)
+				end)
+				return "dragged to (" .. r0(x2) .. "," .. r0(y2) .. ")"
+			end
+			return "dragging isn't supported here"
+		end
+		if d == "click" or d == "rightclick" or d == "doubleclick" then
+			local before = stateOf()
+			local label = tgt and tgt.label or ("(" .. r0(x) .. "," .. r0(y) .. ")")
+			local kind = tgt and tgt.kind or "point"
+			local method, okc, why
+			if tgt and tgt.kind == "prompt" then
+				local pp = tgt.obj
+				if tgt.dist and tgt.dist > (pp.MaxActivationDistance or 10) + 2 then
+					return "too far from " .. label .. ", walk closer first"
+				end
+				if type(fireproximityprompt) == "function" then
+					okc, method = pcall(fireproximityprompt, pp), "fire"
+				elseif VIM then
+					okc, method = pcall(function()
+						VIM:SendKeyEvent(true, pp.KeyboardKeyCode, false, game)
+						task.wait((pp.HoldDuration or 0) + 0.15)
+						VIM:SendKeyEvent(false, pp.KeyboardKeyCode, false, game)
+					end), "key"
+				end
+			elseif tgt and tgt.kind == "seat" then
+				walkTo(tgt.pos)
+				okc, method = true, "walk"
+			else
+				local ok, why2 = M.safeAt(x, y)
+				if not ok then
+					return "refused: " .. why2
+				end
+				M.moveTo(x, y)
+				okc, why = M.click(d == "rightclick" and "right" or "left")
+				method = why
+				if d == "doubleclick" and okc then
+					task.wait(0.1)
+					M.click("left")
+				end
+				if not okc then
+					return "could not click: " .. tostring(why)
+				end
+			end
+			task.wait(0.6)
+			local outcome, changed = diff(before, stateOf())
+			learnFrom(kind, label, method or "?", outcome, okc and (changed or method == "fire" or method == "key"))
+			return (d .. " on " .. label .. " via " .. tostring(method) .. ": " .. outcome)
+		end
+		return "unknown action " .. d
+	end
+
+	function M.decide(v)
+		if M.pending then
+			M.pending.decision = v
+		end
+	end
+	local function approve(acts)
+		if cfg.MouseMode ~= "Ask" then
+			return true
+		end
+		local bits = {}
+		for _, a in ipairs(acts) do
+			bits[#bits + 1] = tostring(a["do"] or a.action) .. (a.target and (" " .. tostring(a.target)) or "") .. ((a.x and a.y) and (" (" .. r0(a.x) .. "," .. r0(a.y) .. ")") or "")
+		end
+		M.pending = { text = "The AI wants to: " .. table.concat(bits, ", then "), decision = nil }
+		if M.onPending then
+			pcall(M.onPending)
+		end
+		local t0 = os.clock()
+		while Alive and M.pending.decision == nil and os.clock() - t0 < 60 and not M.stop do
+			task.wait(0.4)
+		end
+		local ok = M.pending.decision == true
+		M.pending = nil
+		if M.onPending then
+			pcall(M.onPending)
+		end
+		return ok
+	end
+
+	local PLAN_SYS = [[You control a virtual mouse cursor in a Roblox game for the player's character. You see a text description of the screen and what is near the character.
+Reply with ONLY a JSON object: {"thought":"short","actions":[{"do":"click","target":"p1"}],"done":false}
+Actions ("do"): click, rightclick, doubleclick, move, drag (x,y,to_x,to_y), scroll (amount, positive = up), wait (seconds), face (target), walk (target). Use "target" ids from the list when you can, otherwise x and y in screen pixels.
+Give one to three actions per turn. Set "done":true when the goal is finished or cannot be done.
+Never click anything about buying, Robux, trading, gamepasses or Roblox menus, and never click the AI's own window. If something fails, try another approach (walk closer, face it, a different target).]]
+
+	function M.run(goal)
+		if M.running then
+			return false, "already working on a goal"
+		end
+		if cfg.MouseMode == "Off" then
+			return false, "turn the virtual mouse on first (Ask first or Auto)"
+		end
+		if #Keys.active() == 0 then
+			return false, "add an API key first"
+		end
+		M.running, M.stop = true, false
+		task.spawn(function()
+			local history = {}
+			mlog("Goal: " .. goal)
+			for step = 1, 10 do
+				if M.stop or not Alive then
+					break
+				end
+				local lessons = {}
+				for _, e in ipairs(World.search(keywords(goal).list, 4)) do
+					if e.k == "mouse" then
+						lessons[#lessons + 1] = e.m
+					end
+				end
+				local msgs = {
+					{ role = "system", content = PLAN_SYS .. "\n\n[What you learned about the mouse]\nSkill record (ok/tries): " .. M.skillsText() .. "\n" .. table.concat(lessons, "\n") .. ((World.notes() ~= "") and ("\n\n[Game notes]\n" .. World.notes()) or "") },
+					{ role = "user", content = "Goal: " .. goal .. "\n\n" .. M.observe() .. ((#history > 0) and ("\n\nWhat you already did:\n" .. table.concat(history, "\n")) or "") },
+				}
+				local text, err = llm(msgs, 350, "world")
+				if not text then
+					mlog("Mouse AI error: " .. tostring(err))
+					break
+				end
+				local raw = text:match("%b{}")
+				local d = raw and jdecode(raw)
+				if type(d) ~= "table" then
+					mlog("The AI did not answer with an action plan")
+					break
+				end
+				local acts = {}
+				if type(d.actions) == "table" then
+					for i = 1, math.min(3, #d.actions) do
+						if type(d.actions[i]) == "table" then
+							acts[#acts + 1] = d.actions[i]
+						end
+					end
+				end
+				if #acts > 0 then
+					if not approve(acts) then
+						mlog("Actions were not approved, stopping")
+						break
+					end
+					for _, a in ipairs(acts) do
+						if M.stop or not Alive then
+							break
+						end
+						local res = M.act(a)
+						history[#history + 1] = res
+						mlog(res)
+					end
+				end
+				if d.done == true or tostring(d.done):lower() == "true" then
+					break
+				end
+			end
+			M.running = false
+			mlog("Finished: " .. goal)
+		end)
+		return true, "started"
+	end
+	function M.stopNow()
+		M.stop = true
+	end
+
+	-- learning how the mouse behaves on this device and in this game
+	function M.train()
+		if M.running then
+			return false
+		end
+		M.running = true
+		task.spawn(function()
+			local caps = {
+				virtualInput = VIM ~= nil,
+				fireclick = type(fireclickdetector) == "function",
+				fireprompt = type(fireproximityprompt) == "function",
+				firesignal = type(firesignal) == "function",
+				getconnections = type(getconnections) == "function",
+			}
+			M.profile.caps = caps
+			local vp = viewport()
+			local pts = { { 0.5, 0.55 }, { 0.3, 0.45 }, { 0.7, 0.65 } }
+			local engineOk, off = false, nil
+			if VIM then
+				M.engine, M.offY = nil, 0
+				local good = 0
+				for n, p in ipairs(pts) do
+					local x, y = vp.X * p[1], vp.Y * p[2]
+					local tries = 0
+					while not M.safeAt(x, y) and tries < 6 do
+						x, y = x + 40, y + 20
+						tries = tries + 1
+					end
+					M.moveTo(x, y, 0.25)
+					task.wait(0.2)
+					local okl, loc = pcall(function()
+						return UserInputService:GetMouseLocation()
+					end)
+					if okl and loc then
+						if n == 1 then
+							off = y - loc.Y
+							M.offY = (math.abs(off) < 1.5) and 0 or off
+							M.moveTo(x, y, 0.1)
+							task.wait(0.15)
+							local _, loc2 = pcall(function()
+								return UserInputService:GetMouseLocation()
+							end)
+							if loc2 and math.abs(loc2.X - x) < 6 and math.abs(loc2.Y - y) < 6 then
+								good = good + 1
+							end
+						else
+							local dx, dy = math.abs(loc.X - x), math.abs(loc.Y - y)
+							if dx < 6 and dy < 6 then
+								good = good + 1
+							end
+						end
+					end
+				end
+				engineOk = good >= 2
+			end
+			M.engine = engineOk
+			-- can it point at things in the 3D world?
+			local hits, tries = 0, 0
+			if engineOk then
+				local snap = World.scan()
+				for _, g in ipairs(snap.near) do
+					if tries >= 3 then
+						break
+					end
+					local ok, v, on = pcall(function()
+						return cam():WorldToViewportPoint(g.obj:IsA("Model") and g.obj:GetPivot().Position or g.obj.Position)
+					end)
+					if ok and on and v.Z > 0 and M.safeAt(v.X, v.Y) then
+						tries = tries + 1
+						M.moveTo(v.X, v.Y, 0.25)
+						task.wait(0.2)
+						pcall(function()
+							local tgt = lp:GetMouse().Target
+							if tgt and (tgt == g.obj or tgt:IsDescendantOf(g.obj)) then
+								hits = hits + 1
+							end
+						end)
+					end
+				end
+			end
+			M.profile.engine, M.profile.offY, M.profile.hits, M.profile.tries, M.profile.tested = engineOk, M.offY, hits, tries, os.time()
+			saveProfile()
+			local sum = "Mouse training: real mouse " .. (engineOk and "works" or "not available, using direct clicks") .. (engineOk and (", offset " .. r0(M.offY) .. "px, 3D pointing " .. hits .. "/" .. tries) or "") .. ". Executor: " .. (caps.fireclick and "clickdetectors " or "") .. (caps.fireprompt and "prompts " or "") .. (caps.firesignal and "buttons" or "")
+			World.add("mouse", sum)
+			M.running = false
+			mlog(sum)
+		end)
+		return true
+	end
+end
+
+------------------------------------------------------------------ Coding tab + Ask AI backends
+local Assist = {}
+do
+	local CODE_SYS = [[You are an expert Roblox Luau scripter helping the owner of a mobile executor (Delta on Android). Write complete, ready-to-run scripts for executor use. Rules: reply with the full script in ONE ```lua code block, then at most three short bullet notes. Keep the code robust: pcall around risky calls, wait for objects with WaitForChild, avoid deprecated APIs. If the request is unclear, make a sensible choice and say what you assumed.]]
+	local ASK_SYS = [[You are a friendly, knowledgeable assistant chatting privately with the owner of this script. You can answer anything. Keep replies compact for a phone screen unless asked for detail. If notes about what you can currently see or hear in their Roblox game are provided, use them for game questions.]]
+
+	local function worldCtx(on)
+		if not (on and (cfg.WorldSight or cfg.WorldHear)) then
+			return ""
+		end
+		local t = "\n\n[The Roblox game right now]\n" .. World.describe({ budget = 800 })
+		local n = World.notes()
+		if n ~= "" then
+			t = t .. "\nNotes: " .. n
+		end
+		return t
+	end
+
+	function Assist.code(prompt)
+		local sys = CODE_SYS .. worldCtx(cfg.CodingUseWorld)
+		if cfg.CodingUseWorld and (cfg.WorldSight or cfg.WorldHear) then
+			local paths = World.paths()
+			if #paths > 0 then
+				sys = sys .. "\nInstance paths you can use:\n" .. table.concat(paths, "\n")
+			end
+		end
+		local msgs = { { role = "system", content = sys } }
+		for i = math.max(1, #CodeHist - 7), #CodeHist do
+			msgs[#msgs + 1] = { role = CodeHist[i].r, content = CodeHist[i].m }
+		end
+		msgs[#msgs + 1] = { role = "user", content = prompt }
+		local text, err = llm(msgs, 2200, "coding", true)
+		if not text then
+			return nil, err
+		end
+		CodeHist[#CodeHist + 1] = { t = os.time(), r = "user", m = trimChars(prompt, 1500) }
+		CodeHist[#CodeHist + 1] = { t = os.time(), r = "assistant", m = text }
+		while #CodeHist > 40 do
+			table.remove(CodeHist, 1)
+		end
+		Dirty.code = true
+		return text
+	end
+
+	function Assist.extract(text)
+		return text:match("```[Ll]ua%s*\n(.-)```") or text:match("```%w*%s*\n(.-)```") or text
+	end
+
+	function Assist.ask(q)
+		local sys = ASK_SYS .. worldCtx(cfg.AskUseWorld)
+		local kws = keywords(q).list
+		local from = math.max(1, #AskMem - 9)
+		if #kws > 0 then
+			local rel = {}
+			for i = from - 1, 1, -1 do
+				local e = AskMem[i]
+				local low, hit = tostring(e.m):lower(), 0
+				for _, w in ipairs(kws) do
+					if low:find(w, 1, true) then
+						hit = hit + 1
+					end
+				end
+				if hit >= math.min(2, #kws) then
+					rel[#rel + 1] = (e.r == "user" and "You asked: " or "You answered: ") .. trimChars(e.m, 200)
+					if #rel >= 4 then
+						break
+					end
+				end
+			end
+			if #rel > 0 then
+				sys = sys .. "\n\n[Earlier in our chats]\n" .. table.concat(rel, "\n")
+			end
+		end
+		local msgs = { { role = "system", content = sys } }
+		for i = from, #AskMem do
+			msgs[#msgs + 1] = { role = AskMem[i].r, content = AskMem[i].m }
+		end
+		msgs[#msgs + 1] = { role = "user", content = q }
+		local text, err = llm(msgs, 900, "ask", true)
+		if not text then
+			return nil, err
+		end
+		AskMem[#AskMem + 1] = { t = os.time(), r = "user", m = trimChars(q, 1000) }
+		AskMem[#AskMem + 1] = { t = os.time(), r = "assistant", m = trimChars(text, 1500) }
+		while #AskMem > CAP_ASK do
+			table.remove(AskMem, 1)
+		end
+		Dirty.ask = true
+		return text
 	end
 end
 
@@ -1737,6 +3912,10 @@ local function buildMessages(job, kb)
 				kwl[#kwl + 1] = w
 			end
 		end
+	end
+	local wb = World.chatBlock and World.chatBlock(items)
+	if wb then
+		sys = sys .. "\n\n[What you can see and hear]\n" .. wb
 	end
 	local recent, stopAt = recentChatLines(exclude, job.group and 12 or 8)
 	if #recent > 0 then
@@ -2332,6 +4511,7 @@ pcall(function()
 	end))
 end)
 
+local function buildUI()
 ------------------------------------------------------------------ UI toolkit
 local T = {
 	bg = Color3.fromRGB(18, 18, 20),
@@ -2458,6 +4638,12 @@ end
 -- two-tap confirm for destructive buttons
 local function armConfirm(btn, idle, action)
 	local armed = false
+	local function idleText()
+		if type(idle) == "function" then
+			return idle()
+		end
+		return idle
+	end
 	track(btn.Activated:Connect(function()
 		if not armed then
 			armed = true
@@ -2465,13 +4651,13 @@ local function armConfirm(btn, idle, action)
 			task.delay(3, function()
 				if armed then
 					armed = false
-					btn.Text = idle
+					btn.Text = idleText()
 				end
 			end)
 			return
 		end
 		armed = false
-		btn.Text = idle
+		btn.Text = idleText()
 		guard(action)
 	end))
 end
@@ -2699,23 +4885,56 @@ local function openModal(titleText, fields, onSave)
 	end, T.accent)
 end
 
------------------------------------------------------------------- page: Bot
-local function maskKey(k)
-	if type(k) ~= "string" or k == "" then
-		return nil
+local function openPicker(titleText, options, current, onPick)
+	local overlay = mk("Frame", { Size = UDim2.fromScale(1, 1), BackgroundColor3 = Color3.new(0, 0, 0), BackgroundTransparency = 0.35, ZIndex = 20, Active = true }, Window)
+	local sf = mk("ScrollingFrame", {
+		Size = UDim2.new(1, -16, 1, -16),
+		Position = UDim2.fromOffset(8, 8),
+		BackgroundColor3 = T.card,
+		BorderSizePixel = 0,
+		ScrollBarThickness = 4,
+		AutomaticCanvasSize = Enum.AutomaticSize.Y,
+		CanvasSize = UDim2.new(),
+	}, overlay)
+	round(sf, 10)
+	listLayout(sf, 4)
+	pad(sf, 10, 14)
+	newLabel(sf, titleText, { bold = true, size = 14 })
+	for _, opt in ipairs(options) do
+		newButton(sf, opt, function()
+			overlay:Destroy()
+			onPick(opt)
+		end, opt == current and T.accent or T.button)
 	end
-	return "..." .. k:sub(-4)
+	newButton(sf, "Cancel", function()
+		overlay:Destroy()
+	end)
 end
 
-local providerBtn, modelBtn, keyBox, persBtn, keyHint
+------------------------------------------------------------------ page: Bot
+local persBtn, persDel, keyStatus
+local function persDelText()
+	if personaIsCustom(cfg.Personality) then
+		return "Delete this personality"
+	end
+	if Pers.overrides[cfg.Personality] then
+		return "Reset prompt to default"
+	end
+	return "Prompt is the default one"
+end
 local function refreshBot()
-	local prov = cfg.Provider
-	providerBtn.Text = "Provider: " .. prov .. "  (tap to switch)"
-	modelBtn.Text = "Model: " .. cfg.Models[prov] .. "  (tap to switch)"
-	local mk4 = maskKey(cfg.Keys[prov])
-	keyBox.PlaceholderText = mk4 and ("Key saved (" .. mk4 .. ") - paste a new one to replace") or "Paste your FREE " .. prov .. " key here"
-	keyHint.Text = "Get a free key: " .. Providers[prov].keyUrl
-	persBtn.Text = "Personality: " .. cfg.Personality .. "  (tap to switch)"
+	persBtn.Text = "Personality: " .. cfg.Personality .. (Pers.overrides[cfg.Personality] and " (edited)" or "") .. "  (tap to switch)"
+	persDel.Text = persDelText()
+	local act = Keys.active()
+	if #act == 0 then
+		keyStatus.Text = "No API key yet. Open the Keys tab and paste a free key."
+	else
+		local b = {}
+		for _, i in ipairs(act) do
+			b[#b + 1] = "Key " .. i .. " " .. cfg.Slots[i].provider
+		end
+		keyStatus.Text = #act .. " key" .. (#act > 1 and "s" or "") .. " ready: " .. table.concat(b, ", ") .. ". Manage them in the Keys tab."
+	end
 end
 
 do
@@ -2724,6 +4943,7 @@ do
 	newHeader(sc, "Status")
 	statusLabel = newLabel(sc, "Starting...", { color = T.dim, size = 12 })
 	moodLabel = newLabel(sc, "", { color = T.accentText, size = 12 })
+	keyStatus = newLabel(sc, "", { color = T.dim, size = 11 })
 	newToggle(sc, "Bot enabled", function()
 		return cfg.Enabled
 	end, function(v)
@@ -2751,83 +4971,93 @@ do
 		status("Trigger names: " .. box.Text)
 	end)
 
-	local ac = newCard(pg)
-	newHeader(ac, "Free AI key")
-	providerBtn = newButton(ac, "", function()
-		local i = 1
-		for k, n in ipairs(ProviderOrder) do
-			if n == cfg.Provider then
-				i = k
-			end
-		end
-		cfg.Provider = ProviderOrder[i % #ProviderOrder + 1]
-		saveCfg()
-		refreshBot()
-	end)
-	keyHint = newLabel(ac, "", { color = T.dim, size = 11 })
-	keyBox = newBox(ac, "", "", 34, false, function(text, box)
-		local k = text:gsub("[%s\"']", "")
-		if k ~= "" then
-			cfg.Keys[cfg.Provider] = k
-			saveCfg()
-			status("Key saved for " .. cfg.Provider)
-		end
-		box.Text = ""
-		refreshBot()
-	end)
-	modelBtn = newButton(ac, "", function()
-		local list = modelList(cfg.Provider)
-		local i = 0
-		for k, m in ipairs(list) do
-			if m == cfg.Models[cfg.Provider] then
-				i = k
-			end
-		end
-		cfg.Models[cfg.Provider] = list[i % #list + 1]
-		saveCfg()
-		refreshBot()
-	end)
-	local r = newRow(ac)
-	rowButton(r, 2, "Refresh models", function()
-		status("Loading model list...")
-		task.spawn(function()
-			local ok, msg = refreshModels()
-			status(msg)
-			guard(refreshBot)
-		end)
-	end)
-	rowButton(r, 2, "Test connection", function()
-		status("Testing " .. cfg.Provider .. "...")
-		task.spawn(function()
-			local txt, err = askRaw("Reply with a very short friendly greeting.", "Say hi in 5 words.", 40)
-			status(txt and ("Works! AI said: " .. txt) or ("Test failed: " .. tostring(err)))
-		end)
-	end, T.accent)
-	newBox(ac, "Or type a model id manually", "", 34, false, function(text, box)
-		text = trim(text)
-		if text ~= "" then
-			cfg.Models[cfg.Provider] = text
-			saveCfg()
-			status("Model set to " .. text)
-		end
-		box.Text = ""
-		refreshBot()
-	end)
-
 	local pc = newCard(pg)
-	newHeader(pc, "Personality")
+	newHeader(pc, "Personality and prompt")
+	newLabel(pc, "Prompts you edit or create are saved in your data folder, so updating the script never resets them.", { color = T.dim, size = 11 })
 	persBtn = newButton(pc, "", function()
-		local i = 1
-		for k, n in ipairs(PersonalityOrder) do
+		local list = personaNames()
+		local i = 0
+		for k, n in ipairs(list) do
 			if n == cfg.Personality then
 				i = k
 			end
 		end
-		cfg.Personality = PersonalityOrder[i % #PersonalityOrder + 1]
+		cfg.Personality = list[i % #list + 1]
 		saveCfg()
 		refreshBot()
 	end)
-	newBox(pc, "Extra instructions (optional)", cfg.CustomPrompt, 60, true, function(text)
+	local pr = newRow(pc)
+	rowButton(pr, 2, "Edit prompt", function()
+		local name = cfg.Personality
+		openModal("Prompt for: " .. name, {
+			{ key = "prompt", label = "System prompt for this personality", value = personaText(name) or "", multiline = true, height = 190 },
+		}, function(v)
+			local t = trim(v.prompt)
+			if t == "" then
+				status("The prompt can't be empty")
+				return
+			end
+			if personaIsCustom(name) then
+				for _, c in ipairs(Pers.custom) do
+					if c.name == name then
+						c.prompt = t
+					end
+				end
+			elseif Personalities[name] == t then
+				Pers.overrides[name] = nil
+			else
+				Pers.overrides[name] = t
+			end
+			savePers()
+			refreshBot()
+			status("Prompt saved for " .. name)
+		end)
+	end)
+	rowButton(pr, 2, "New personality", function()
+		openModal("New personality", {
+			{ key = "name", label = "Name", placeholder = "Pirate" },
+			{ key = "prompt", label = "Prompt (starts from the current one, change what you like)", value = personaText(cfg.Personality) or "", multiline = true, height = 190 },
+		}, function(v)
+			local name, t = trim(v.name), trim(v.prompt)
+			if name == "" or t == "" then
+				status("Give it a name and a prompt")
+				return
+			end
+			if personaText(name) then
+				status("A personality called '" .. name .. "' already exists")
+				return
+			end
+			table.insert(Pers.custom, { name = name, prompt = t })
+			cfg.Personality = name
+			savePers()
+			saveCfg()
+			refreshBot()
+			status("Personality '" .. name .. "' created")
+		end)
+	end, T.accent)
+	persDel = newButton(pc, "", nil, T.danger)
+	armConfirm(persDel, persDelText, function()
+		local name = cfg.Personality
+		if personaIsCustom(name) then
+			for i, c in ipairs(Pers.custom) do
+				if c.name == name then
+					table.remove(Pers.custom, i)
+					break
+				end
+			end
+			cfg.Personality = "Friendly"
+			saveCfg()
+			status("Deleted '" .. name .. "'")
+		elseif Pers.overrides[name] then
+			Pers.overrides[name] = nil
+			status("Prompt for " .. name .. " reset to default")
+		else
+			status("Already the default prompt")
+		end
+		savePers()
+		refreshBot()
+	end)
+	newBox(pc, "Extra instructions for every personality (optional)", cfg.CustomPrompt, 60, true, function(text)
 		cfg.CustomPrompt = trim(text)
 		saveCfg()
 	end)
@@ -2843,6 +5073,223 @@ Smart.moodHook = function()
 	end)
 end
 Smart.notify()
+
+------------------------------------------------------------------ page: Keys (use up to 4 API keys together)
+local refreshKeys
+do
+	local pg = newPage("Keys")
+	local cards, infos, keyBoxes, modelBtns, onBtns, roleBtns = {}, {}, {}, {}, {}, {}
+	local addBtn
+	local ROLES = { { "main", "Main AI (chat replies)" }, { "coding", "Coding tab" }, { "ask", "Ask AI tab" }, { "world", "Virtual world (sight, mouse)" } }
+
+	local function slotLabel(i)
+		local s = cfg.Slots[i]
+		return "Key " .. i .. (s.provider ~= "" and (" (" .. s.provider .. ")") or "")
+	end
+	local function infoText(i)
+		local s = cfg.Slots[i]
+		if s.key == "" then
+			return "Paste a free key. It is recognised automatically: Groq, Gemini, OpenRouter, Cerebras, NVIDIA or Hugging Face."
+		end
+		if s.provider == "" then
+			return "Key not recognised. Tap Provider and pick where it is from."
+		end
+		local age = s.modelsAt > 0 and (os.time() - s.modelsAt) or nil
+		local when = age and (age < 120 and "just now" or (math.floor(age / 60) .. " min ago")) or "loading..."
+		return "Detected " .. s.provider .. ". " .. #s.models .. " models, updated " .. when .. ". " .. (s.on and "" or "(switched off) ") .. "Saved as ..." .. s.key:sub(-4)
+	end
+
+	refreshKeys = function()
+		for i = 1, 4 do
+			local s = cfg.Slots[i]
+			cards[i].Visible = i <= cfg.SlotCount
+			infos[i].Text = infoText(i)
+			keyBoxes[i].PlaceholderText = s.key ~= "" and ("Key saved (..." .. s.key:sub(-4) .. "), paste to replace") or ("Paste API key " .. i)
+			modelBtns[i].Text = (s.key == "") and "No key yet" or (s.model ~= "" and (s.model:match("[^/]+$") or s.model) or (s.provider ~= "" and "Pick model" or "Provider?"))
+			onBtns[i].Text = s.on and "On" or "Off"
+			onBtns[i].BackgroundColor3 = s.on and T.accent or T.off
+		end
+		addBtn.Visible = cfg.SlotCount < 4
+		local act = Keys.active()
+		for k, r in ipairs(ROLES) do
+			local idx = cfg.Roles[r[1]]
+			local s = cfg.Slots[idx]
+			roleBtns[k].Text = (s.key ~= "" and s.provider ~= "") and slotLabel(idx) or ("Key " .. idx .. " (empty)")
+		end
+		pcall(refreshBot)
+	end
+	Keys.onRefresh = function()
+		guard(refreshKeys)
+	end
+
+	local function startRefresh(i)
+		status("Loading " .. slotLabel(i) .. " models...")
+		task.spawn(function()
+			local ok, msg = Keys.refresh(i)
+			status(slotLabel(i) .. ": " .. msg)
+			guard(refreshKeys)
+		end)
+	end
+
+	local hc = newCard(pg)
+	newHeader(hc, "API keys")
+	newLabel(hc, "Use up to 4 free keys at once. Paste a key and the script reads which company it is from, then lists that company's latest models next to the box. The lists refresh by themselves, so new models show up and dead ones disappear.", { color = T.dim, size = 11 })
+
+	for i = 1, 4 do
+		local card = newCard(pg)
+		cards[i] = card
+		newHeader(card, "Key " .. i)
+		local row = mk("Frame", { Size = UDim2.new(1, 0, 0, 34), BackgroundTransparency = 1, LayoutOrder = order() }, card)
+		local box = mk("TextBox", {
+			Size = UDim2.new(0.6, -3, 1, 0),
+			BackgroundColor3 = T.input,
+			Text = "",
+			PlaceholderText = "",
+			PlaceholderColor3 = T.dim,
+			TextColor3 = T.text,
+			Font = Enum.Font.Gotham,
+			TextSize = 12,
+			ClearTextOnFocus = false,
+			TextXAlignment = Enum.TextXAlignment.Left,
+			TextTruncate = Enum.TextTruncate.AtEnd,
+		}, row)
+		round(box, 8)
+		mk("UIPadding", { PaddingLeft = UDim.new(0, 8), PaddingRight = UDim.new(0, 8) }, box)
+		keyBoxes[i] = box
+		local mb = mk("TextButton", {
+			Size = UDim2.new(0.4, -3, 1, 0),
+			Position = UDim2.new(0.6, 3, 0, 0),
+			BackgroundColor3 = T.accent,
+			Text = "",
+			Font = Enum.Font.GothamMedium,
+			TextSize = 12,
+			TextColor3 = T.text,
+			TextTruncate = Enum.TextTruncate.AtEnd,
+		}, row)
+		round(mb, 8)
+		modelBtns[i] = mb
+		track(box.FocusLost:Connect(function()
+			guard(function()
+				local txt = trim(box.Text)
+				box.Text = ""
+				if txt == "" then
+					return
+				end
+				local prov = Keys.setKey(i, txt)
+				saveCfg()
+				refreshKeys()
+				if prov then
+					status("Key " .. i .. " looks like a " .. prov .. " key")
+					startRefresh(i)
+				else
+					status("Key " .. i .. " saved, but I don't recognise it. Tap Provider to choose.")
+				end
+			end)
+		end))
+		track(mb.Activated:Connect(function()
+			guard(function()
+				local s = cfg.Slots[i]
+				if s.key == "" then
+					status("Paste a key first")
+					return
+				end
+				if s.provider == "" then
+					openPicker("Provider for key " .. i, ProviderOrder, "", function(p)
+						Keys.setProvider(i, p)
+						saveCfg()
+						refreshKeys()
+						startRefresh(i)
+					end)
+					return
+				end
+				if #s.models == 0 then
+					startRefresh(i)
+					return
+				end
+				openPicker("Model for key " .. i .. " (" .. s.provider .. ")", s.models, s.model, function(m)
+					s.model = m
+					saveCfg()
+					refreshKeys()
+					status("Key " .. i .. " now uses " .. m)
+				end)
+			end)
+		end))
+		infos[i] = newLabel(card, "", { color = T.dim, size = 11 })
+		local r = newRow(card)
+		rowButton(r, 4, "Test", function()
+			status("Testing key " .. i .. "...")
+			task.spawn(function()
+				if cfg.Slots[i].key == "" or cfg.Slots[i].provider == "" then
+					status("Key " .. i .. " has no key yet")
+					return
+				end
+				local txt, err = Keys.call(i, { { role = "system", content = "Reply with a very short friendly greeting." }, { role = "user", content = "Say hi in 5 words." } }, 40)
+				status(txt and ("Key " .. i .. " works! It said: " .. txt) or ("Key " .. i .. " failed: " .. tostring(err)))
+			end)
+		end, T.accent)
+		rowButton(r, 4, "Models", function()
+			startRefresh(i)
+		end)
+		onBtns[i] = rowButton(r, 4, "On", function()
+			cfg.Slots[i].on = not cfg.Slots[i].on
+			saveCfg()
+			refreshKeys()
+		end)
+		local clr = rowButton(r, 4, "Clear", nil, T.danger)
+		armConfirm(clr, "Clear", function()
+			Keys.setKey(i, "")
+			saveCfg()
+			refreshKeys()
+			status("Key " .. i .. " cleared")
+		end)
+	end
+
+	addBtn = newButton(pg, "+ Add another key", function()
+		cfg.SlotCount = math.min(4, cfg.SlotCount + 1)
+		saveCfg()
+		refreshKeys()
+	end)
+
+	local rc = newCard(pg)
+	newHeader(rc, "Which key does what")
+	for k, r in ipairs(ROLES) do
+		local row = mk("Frame", { Size = UDim2.new(1, 0, 0, 34), BackgroundTransparency = 1, LayoutOrder = order() }, rc)
+		mk("TextLabel", { Size = UDim2.new(0.55, -3, 1, 0), BackgroundTransparency = 1, Text = r[2], TextWrapped = true, TextXAlignment = Enum.TextXAlignment.Left, Font = Enum.Font.Gotham, TextSize = 12, TextColor3 = T.text }, row)
+		local b = mk("TextButton", { Size = UDim2.new(0.45, -3, 1, 0), Position = UDim2.new(0.55, 3, 0, 0), BackgroundColor3 = T.button, Text = "", Font = Enum.Font.GothamMedium, TextSize = 12, TextColor3 = T.text, TextTruncate = Enum.TextTruncate.AtEnd }, row)
+		round(b, 8)
+		roleBtns[k] = b
+		track(b.Activated:Connect(function()
+			guard(function()
+				local cur = cfg.Roles[r[1]]
+				local nxt
+				for step = 1, 4 do
+					local c = (cur + step - 1) % 4 + 1
+					if cfg.Slots[c].key ~= "" and cfg.Slots[c].provider ~= "" then
+						nxt = c
+						break
+					end
+				end
+				cfg.Roles[r[1]] = nxt or cur
+				saveCfg()
+				refreshKeys()
+			end)
+		end))
+	end
+	newToggle(rc, "Keys help each other when one is busy or rate limited", function()
+		return cfg.KeysHelp
+	end, function(v)
+		cfg.KeysHelp = v
+		saveCfg()
+	end)
+	newToggle(rc, "Share the work between all keys", function()
+		return cfg.ShareLoad
+	end, function(v)
+		cfg.ShareLoad = v
+		saveCfg()
+	end)
+	newLabel(rc, "Free keys: Groq console.groq.com/keys, Gemini aistudio.google.com/apikey, OpenRouter openrouter.ai/keys.", { color = T.dim, size = 11 })
+	refreshKeys()
+end
 
 ------------------------------------------------------------------ page: Knowledge (brain)
 local kbList
@@ -2965,7 +5412,7 @@ do
 		src.Text, ttl.Text, trg.Text = "", "", ""
 		status("Saved '" .. e.title .. "'")
 		rebuildKnowledge()
-		if cfg.Keys[cfg.Provider] ~= "" then
+		if #Keys.active() > 0 then
 			task.spawn(function()
 				pcall(ensureSummary, e)
 				flush()
@@ -3076,11 +5523,329 @@ do
 	rebuildTriggers()
 end
 
+------------------------------------------------------------------ page: World (sight, hearing, virtual mouse)
+local worldRefresh
+do
+	local pg = newPage("World")
+	local M = World.mouse
+	local seeLabel, statsLabel, notesLabel, skillsLabel, logLabel, mouseBtn, pendCard, pendLabel
+
+	worldRefresh = function()
+		local n, total = World.stats()
+		statsLabel.Text = "World memory here: " .. n .. " / " .. CAP_WORLD .. "   (all games: " .. total .. ")"
+		local info = World.notesInfo()
+		notesLabel.Text = info.text ~= "" and ("What I learned about this game: " .. info.text) or "No game notes yet. Turn on sight and tap Learn this game."
+		skillsLabel.Text = "Mouse skills: " .. M.skillsText() .. (M.engine == true and "  |  real mouse: yes" or (M.engine == false and "  |  real mouse: no (direct clicks)" or "  |  not trained yet"))
+		logLabel.Text = #M.log > 0 and table.concat(M.log, "\n") or "No mouse activity yet."
+		mouseBtn.Text = "Virtual mouse: " .. (cfg.MouseMode == "Ask" and "Ask first" or cfg.MouseMode) .. "  (tap to change)"
+		if pendCard then
+			pendCard.Visible = M.pending ~= nil
+			pendLabel.Text = M.pending and M.pending.text or ""
+		end
+	end
+
+	local sc = newCard(pg)
+	newHeader(sc, "Senses")
+	newToggle(sc, "See: players, buildings, held items, emotes", function()
+		return cfg.WorldSight
+	end, function(v)
+		cfg.WorldSight = v
+		saveCfg()
+		if v then
+			World.start()
+		end
+	end)
+	newToggle(sc, "Hear: music, boomboxes and other audio", function()
+		return cfg.WorldHear
+	end, function(v)
+		cfg.WorldHear = v
+		saveCfg()
+		if v then
+			World.start()
+		end
+	end)
+	newLabel(sc, "Roblox gives scripts no access to voice chat, so the AI cannot understand speech. It reads chat, and it hears audio playing in the game by its title.", { color = T.dim, size = 11 })
+	seeLabel = newLabel(sc, "Tap Look now to see what the AI sees.", { size = 11 })
+	local r1 = newRow(sc)
+	rowButton(r1, 2, "Look now", function()
+		World.start()
+		seeLabel.Text = "Looking around..."
+		task.spawn(function()
+			World.scan()
+			task.wait(3) -- song and emote names are looked up in the background
+			seeLabel.Text = World.describe({ budget = 1500, maxAge = 0 })
+			guard(worldRefresh)
+		end)
+	end, T.accent)
+	rowButton(r1, 2, "Learn this game", function()
+		if #Keys.active() == 0 then
+			status("Add an API key first (Keys tab)")
+			return
+		end
+		World.start()
+		status("Learning this game...")
+		task.spawn(function()
+			World.scan()
+			local ok, res = World.learn()
+			status(ok and "Learned this game" or ("Could not learn: " .. tostring(res)))
+			guard(worldRefresh)
+		end)
+	end)
+	statsLabel = newLabel(sc, "", { color = T.dim, size = 11 })
+	notesLabel = newLabel(sc, "", { color = T.dim, size = 11 })
+
+	local mc = newCard(pg)
+	newHeader(mc, "Virtual mouse")
+	newLabel(mc, "A cursor the AI moves and clicks like a real mouse. It never touches its own window, Roblox menus, or anything that costs Robux.", { color = T.dim, size = 11 })
+	mouseBtn = newButton(mc, "", function()
+		cfg.MouseMode = (cfg.MouseMode == "Off") and "Ask" or ((cfg.MouseMode == "Ask") and "Auto" or "Off")
+		saveCfg()
+		M.refreshCursor()
+		worldRefresh()
+	end)
+	newLabel(mc, "Ask first: you approve each action. Auto: it acts by itself while working on a goal.", { color = T.dim, size = 11 })
+	newToggle(mc, "Show the cursor", function()
+		return cfg.CursorVisible
+	end, function(v)
+		cfg.CursorVisible = v
+		saveCfg()
+		M.refreshCursor()
+	end)
+	local r2 = newRow(mc)
+	rowButton(r2, 2, "Train the mouse", function()
+		if cfg.MouseMode == "Off" then
+			status("Turn the virtual mouse on first")
+			return
+		end
+		World.start()
+		M.train()
+	end, T.accent)
+	rowButton(r2, 2, "Stop", function()
+		M.stopNow()
+	end, T.danger)
+	skillsLabel = newLabel(mc, "", { color = T.dim, size = 11 })
+	local goal = newBox(mc, "Goal, e.g. open the chest next to me", "", 50, true)
+	newButton(mc, "Run goal", function()
+		local g = trim(goal.Text)
+		if g == "" then
+			status("Type a goal first")
+			return
+		end
+		World.start()
+		local ok, msg = M.run(g)
+		status(ok and "Working on it..." or msg)
+	end, T.accent)
+	pendCard = newCard(mc)
+	pendCard.Visible = false
+	pendLabel = newLabel(pendCard, "", { size = 12 })
+	local pr = newRow(pendCard)
+	rowButton(pr, 2, "Allow", function()
+		M.decide(true)
+	end, T.accent)
+	rowButton(pr, 2, "Deny", function()
+		M.decide(false)
+	end, T.danger)
+	logLabel = newLabel(mc, "", { color = T.dim, size = 11 })
+	M.onLog = function()
+		guard(worldRefresh)
+	end
+	M.onPending = function()
+		guard(worldRefresh)
+	end
+	worldRefresh()
+end
+
+------------------------------------------------------------------ page: Coding
+local copyText = function(text)
+	local fn = setclipboard or toclipboard or (syn and syn.write_clipboard) or (Clipboard and Clipboard.set)
+	if fn then
+		return pcall(fn, text)
+	end
+	return false
+end
+local function saveCode(text)
+	if not hasFS then
+		return nil
+	end
+	ensureDir(DIR)
+	ensureDir(DIR .. "/code")
+	local path = DIR .. "/code/script-" .. tostring(os.time()) .. ".lua"
+	if pcall(writefile, path, text) then
+		return path
+	end
+	return nil
+end
+
+do
+	local pg = newPage("Coding")
+	local list, busy, box
+	local working = false
+
+	local function render()
+		for _, c in ipairs(list:GetChildren()) do
+			if c:IsA("Frame") then
+				c:Destroy()
+			end
+		end
+		local from = math.max(1, #CodeHist - 11)
+		local k = 0
+		for i = #CodeHist, from, -1 do
+			local e = CodeHist[i]
+			k = k + 1
+			local card = newCard(list)
+			card.LayoutOrder = k
+			if e.r == "user" then
+				newLabel(card, "You: " .. trimChars(e.m, 300), { color = T.dim, size = 12 })
+			else
+				newLabel(card, "AI code", { bold = true, size = 12, color = T.accentText })
+				local out = mk("TextBox", { Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, BackgroundColor3 = T.input, Text = e.m, TextEditable = false, ClearTextOnFocus = false, MultiLine = true, TextWrapped = true, TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top, Font = Enum.Font.Code, TextSize = 12, TextColor3 = T.text, LayoutOrder = order() }, card)
+				round(out, 8)
+				mk("UIPadding", { PaddingLeft = UDim.new(0, 8), PaddingRight = UDim.new(0, 8), PaddingTop = UDim.new(0, 6), PaddingBottom = UDim.new(0, 6) }, out)
+				local r = newRow(card)
+				rowButton(r, 2, "Copy code", function()
+					local code = Assist.extract(e.m)
+					if copyText(code) then
+						status("Code copied")
+					else
+						local path = saveCode(code)
+						status(path and ("Clipboard not available, saved to " .. path) or "Could not copy or save")
+					end
+				end, T.accent)
+				rowButton(r, 2, "Save .lua", function()
+					local path = saveCode(Assist.extract(e.m))
+					status(path and ("Saved to " .. path) or "Could not save the file")
+				end)
+			end
+		end
+	end
+
+	local cc = newCard(pg)
+	newHeader(cc, "Coding assistant")
+	newLabel(cc, "Tell the AI what script you want. It writes complete Luau for your executor. Uses the key chosen for Coding in the Keys tab.", { color = T.dim, size = 11 })
+	box = newBox(cc, "e.g. a script that auto-collects coins near me", "", 80, true)
+	newToggle(cc, "Use what the AI knows about this game", function()
+		return cfg.CodingUseWorld
+	end, function(v)
+		cfg.CodingUseWorld = v
+		saveCfg()
+	end)
+	local r = newRow(cc)
+	rowButton(r, 2, "Write code", function()
+		local prompt = trim(box.Text)
+		if prompt == "" then
+			status("Describe the script first")
+			return
+		end
+		if working then
+			return
+		end
+		working = true
+		busy.Text = "Writing..."
+		task.spawn(function()
+			local text, err = Assist.code(prompt)
+			working = false
+			if text then
+				busy.Text = ""
+				box.Text = ""
+				flush()
+			else
+				busy.Text = "Error: " .. tostring(err)
+			end
+			guard(render)
+		end)
+	end, T.accent)
+	local clr = rowButton(r, 2, "Clear history", nil, T.danger)
+	armConfirm(clr, "Clear history", function()
+		CodeHist = {}
+		Dirty.code = true
+		flush()
+		render()
+	end)
+	busy = newLabel(cc, "", { color = T.dim, size = 11 })
+	newHeader(pg, "Conversation")
+	list = mk("Frame", { Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, BackgroundTransparency = 1, LayoutOrder = order() }, pg)
+	listLayout(list, 8)
+	render()
+end
+
+------------------------------------------------------------------ page: Ask AI (private chat with its own 2000-message memory)
+do
+	local pg = newPage("AskAI")
+	local list, busy, box, countLabel
+	local working = false
+
+	local function render()
+		countLabel.Text = "Ask AI memory: " .. #AskMem .. " / " .. CAP_ASK .. "  (only used here)"
+		for _, c in ipairs(list:GetChildren()) do
+			if c:IsA("Frame") then
+				c:Destroy()
+			end
+		end
+		local k = 0
+		for i = #AskMem, math.max(1, #AskMem - 19), -1 do
+			local e = AskMem[i]
+			k = k + 1
+			local card = newCard(list)
+			card.LayoutOrder = k
+			if e.r == "user" then
+				newLabel(card, "You: " .. e.m, { color = T.dim, size = 12 })
+			else
+				local out = mk("TextBox", { Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, BackgroundTransparency = 1, Text = e.m, TextEditable = false, ClearTextOnFocus = false, MultiLine = true, TextWrapped = true, TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top, Font = Enum.Font.Gotham, TextSize = 13, TextColor3 = T.text, LayoutOrder = order() }, card)
+			end
+		end
+	end
+
+	local cc = newCard(pg)
+	newHeader(cc, "Ask AI")
+	newLabel(cc, "Chat with the AI about anything. It has its own memory that only this tab uses. Uses the key chosen for Ask AI in the Keys tab.", { color = T.dim, size = 11 })
+	box = newBox(cc, "Ask anything...", "", 60, true)
+	newToggle(cc, "Let it use what it sees and hears in the game", function()
+		return cfg.AskUseWorld
+	end, function(v)
+		cfg.AskUseWorld = v
+		saveCfg()
+	end)
+	local r = newRow(cc)
+	rowButton(r, 2, "Ask", function()
+		local q = trim(box.Text)
+		if q == "" or working then
+			return
+		end
+		working = true
+		busy.Text = "Thinking..."
+		task.spawn(function()
+			local text, err = Assist.ask(q)
+			working = false
+			if text then
+				busy.Text = ""
+				box.Text = ""
+				flush()
+			else
+				busy.Text = "Error: " .. tostring(err)
+			end
+			guard(render)
+		end)
+	end, T.accent)
+	local wp = rowButton(r, 2, "Wipe Ask AI memory", nil, T.danger)
+	armConfirm(wp, "Wipe Ask AI memory", function()
+		AskMem = {}
+		Dirty.ask = true
+		flush()
+		render()
+		status("Ask AI memory wiped")
+	end)
+	busy = newLabel(cc, "", { color = T.dim, size = 11 })
+	countLabel = newLabel(cc, "", { color = T.dim, size = 11 })
+	list = mk("Frame", { Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, BackgroundTransparency = 1, LayoutOrder = order() }, pg)
+	listLayout(list, 8)
+	render()
+end
+
 ------------------------------------------------------------------ page: Memory (chatgpt icon)
-local refreshMemory, smartCard
+local refreshMemory, smartCard, worldCard
 do
 	local pg = newPage("Memory")
-	local chatCount, trigCount, chatList, trigList, smartCount, feelLabel, relList, smartList
+	local chatCount, trigCount, chatList, trigList, smartCount, feelLabel, relList, smartList, worldCount, worldList
 
 	local function fill(container, lines)
 		for _, c in ipairs(container:GetChildren()) do
@@ -3155,6 +5920,9 @@ do
 			end
 		end
 		fill(smartList, sl)
+		local wn, wt = World.stats()
+		worldCount.Text = "World memory (this game): " .. wn .. " / " .. CAP_WORLD .. "   all games: " .. wt
+		fill(worldList, World.recentLines(25))
 	end
 
 	local cc = newCard(pg)
@@ -3222,10 +5990,28 @@ do
 	smartList = mk("Frame", { Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, BackgroundTransparency = 1, LayoutOrder = order() }, smartCard)
 	listLayout(smartList, 2)
 
+	worldCard = newCard(pg)
+	newHeader(worldCard, "World memory")
+	worldCount = newLabel(worldCard, "", { size = 12 })
+	newLabel(worldCard, "What the AI notices in games: buildings, what players hold, sit on or dance to, sounds and mouse lessons. Stored in one set of small files per game, so it can grow far beyond phone memory (cap 99,999,999 per game).", { color = T.dim, size = 11 })
+	local wr = newRow(worldCard)
+	rowButton(wr, 2, "Refresh", function()
+		refreshMemory()
+	end)
+	local ww = rowButton(wr, 2, "Wipe this game", nil, T.danger)
+	armConfirm(ww, "Wipe this game", function()
+		World.wipe()
+		refreshMemory()
+		status("World memory for this game wiped")
+	end)
+	worldList = mk("Frame", { Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, BackgroundTransparency = 1, LayoutOrder = order() }, worldCard)
+	listLayout(worldList, 2)
+
 	local wa = newButton(pg, "Wipe ALL memory", nil, T.danger)
 	armConfirm(wa, "Wipe ALL memory", function()
 		Chat, Trig, SmartMem = {}, {}, {}
 		Smart.reset()
+		World.wipe()
 		Dirty.chat, Dirty.trig, Dirty.smart = true, true, true
 		flush()
 		refreshMemory()
@@ -3341,6 +6127,19 @@ do
 		cfg.RangeStuds = v
 	end, 5, 2000)
 
+	local ub = newCard(pg)
+	newHeader(ub, "Updates and backup")
+	newLabel(ub, "Everything you add (knowledge, trigger messages, prompts, keys, settings, memories) lives in the " .. DIR .. " folder, not in this script, so updating the script never resets it. The first time a new version runs it also saves a copy of your data.", { color = T.dim, size = 11 })
+	newLabel(ub, "Script version " .. VERSION .. ((type(Meta.snapshot) == "string") and ("  |  backup folder: " .. DIR .. "/backup/" .. Meta.snapshot) or ""), { color = T.dim, size = 11 })
+	local rb = newButton(ub, "Restore data from before the last update", nil, T.danger)
+	armConfirm(rb, "Restore data from before the last update", function()
+		local ok, msg = restoreSnapshot()
+		status(msg)
+		if ok then
+			task.delay(3, baseCleanup)
+		end
+	end)
+
 	local bc = newCard(pg)
 	newHeader(bc, "Ignore these players")
 	newLabel(bc, "Usernames or user ids, comma separated.", { color = T.dim, size = 11 })
@@ -3354,8 +6153,12 @@ end
 ------------------------------------------------------------------ tabs
 local TABS = {
 	{ id = "Bot", label = "Bot", icon = "bot", fb = "B" },
+	{ id = "Keys", label = "Keys", icon = "key", fb = "K" },
 	{ id = "Knowledge", label = "Knowledge", icon = "brain", fb = "K" },
 	{ id = "Triggers", label = "Triggers", icon = "zap", fb = "T" },
+	{ id = "World", label = "World", icon = "globe", fb = "W" },
+	{ id = "Coding", label = "Coding", icon = "code", fb = "C" },
+	{ id = "AskAI", label = "Ask AI", icon = "sparkles", fb = "A" },
 	{ id = "Memory", label = "Memory", icon = "chatgpt", fb = "M" },
 	{ id = "Settings", label = "Settings", icon = "settings", fb = "S" },
 }
@@ -3388,9 +6191,21 @@ do
 end
 
 ------------------------------------------------------------------ boot
+World.mouse.attach(Gui, Window, Fab)
+if cfg.WorldSight or cfg.WorldHear then
+	World.start()
+end
 switchTab("Bot")
+end
+buildUI()
 
+G.SofiAI.World, G.SofiAI.Keys = World, Keys
+local cleaned = false
 G.SofiAI.Cleanup = function()
+	if cleaned then
+		return -- a stale copy must never overwrite newer data
+	end
+	cleaned = true
 	pcall(flush, true)
 	followTarget = nil
 	baseCleanup()
@@ -3400,8 +6215,8 @@ if not hasFS then
 	status("Your executor can't save files - memory won't survive rejoining")
 elseif not httprequest then
 	status("Your executor has no HTTP request function - AI replies won't work")
-elseif (cfg.Keys[cfg.Provider] or "") == "" then
-	status("Paste your free " .. cfg.Provider .. " key in the Bot tab (" .. Providers[cfg.Provider].keyUrl .. ")")
+elseif #Keys.active() == 0 then
+	status("Add a free API key in the Keys tab (Groq: console.groq.com/keys)")
 else
 	status("Ready. Listening for: " .. table.concat(cfg.Names, ", "))
 end
