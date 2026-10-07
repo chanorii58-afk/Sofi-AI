@@ -19,7 +19,7 @@
 local PRESET_KEYS = { "", "", "", "" } -- optional: paste up to 4 API keys here (you can also use the Keys tab)
 local CAP_CHAT, CAP_TRIGGER, CAP_SMART, CAP_ASK, CAP_WORLD = 6000, 5500, 7000, 2000, 99999999
 local DIR = "SofiAI"
-local VERSION = "3.0"
+local VERSION = "3.1"
 
 local Players = game:GetService("Players")
 local HttpService = game:GetService("HttpService")
@@ -60,7 +60,7 @@ local function baseCleanup()
 		end)
 	end
 end
-G.SofiAI = { Cleanup = baseCleanup, Version = "3.0" }
+G.SofiAI = { Cleanup = baseCleanup, Version = "3.1" }
 
 ------------------------------------------------------------------ executor helpers
 local httprequest = (syn and syn.request) or (http and http.request) or http_request or (fluxus and fluxus.request) or request
@@ -735,6 +735,11 @@ local Default = {
 	CursorVisible = true,
 	CodingUseWorld = true,
 	AskUseWorld = true,
+	AutoWalk = false,
+	WalkEvery = 30,
+	WalkRadius = 80,
+	FreeWill = false,
+	FWSaved = {},
 }
 for i = 1, 4 do
 	Default.Slots[i] = { key = "", provider = "", model = "", models = {}, modelsAt = 0, on = true }
@@ -1483,8 +1488,8 @@ local function makeSystemPrompt()
 	return sys
 end
 
-local function askRaw(system, user, maxTokens, role)
-	return llm({ { role = "system", content = system }, { role = "user", content = user } }, maxTokens, role)
+local function askRaw(system, user, maxTokens, role, keep)
+	return llm({ { role = "system", content = system }, { role = "user", content = user } }, maxTokens, role, keep)
 end
 
 local FailAt = {}
@@ -1741,6 +1746,38 @@ do
 		return score, ar
 	end
 
+	local FACT = { "i am ", "i'm ", "im ", "my name is ", "i like ", "i love ", "i hate ", "i have ", "i play ", "i live in ", "i want ", "my favorite ", "my favourite ", "call me " }
+	local function learnFacts(pr, text)
+		if text:find("?", 1, true) then
+			return
+		end
+		local low = " " .. oneLine(text):lower():gsub(" and i ", ". i ") .. " "
+		for sent in low:gmatch("[^%.!;]+") do
+			for _, pat in ipairs(FACT) do
+				local at = sent:find("%f[%w]" .. escapePattern(pat))
+				if at then
+					local fact = trim(sent:sub(at))
+					if #fact >= 8 and #fact <= 70 then
+						pr.facts = pr.facts or {}
+						local dup = false
+						for _, f in ipairs(pr.facts) do
+							if f == fact then
+								dup = true
+							end
+						end
+						if not dup then
+							pr.facts[#pr.facts + 1] = fact
+							while #pr.facts > 8 do
+								table.remove(pr.facts, 1)
+							end
+						end
+					end
+					break
+				end
+			end
+		end
+	end
+
 	-- every chat message nudges the AI's mood and how it feels about that player
 	function Smart.onMessage(p, text, addressed)
 		decay()
@@ -1772,6 +1809,7 @@ do
 		pr.n = (pr.n or 0) + 1
 		pr.last = os.time()
 		pr.d = p.DisplayName or p.Name
+		learnFacts(pr, text)
 		Emo.lastMsg = os.time()
 		Dirty.state = true
 		notify()
@@ -1844,6 +1882,8 @@ do
 			return "* " .. (e.d or e.u or "?") .. " joined"
 		elseif e.k == "l" then
 			return "* " .. (e.d or e.u or "?") .. " left"
+		elseif e.k == "w" then
+			return "* You " .. trimChars(e.m, 120)
 		end
 		local s = (e.d or e.u or "?") .. ": " .. trimChars(e.m, 120)
 		if e.x == "q" then
@@ -1921,7 +1961,7 @@ Use "respond":false and "reply":"" when you stay quiet. "emotion" is how you fee
 			if not seen[it.p.Name] then
 				seen[it.p.Name] = true
 				local pr = person(it.p)
-				pl[#pl + 1] = (it.p.DisplayName or it.p.Name) .. ": " .. Smart.rel(pr.aff) .. " (" .. string.format("%+d", math.floor(pr.aff + 0.5)) .. "), " .. (pr.n or 0) .. " messages so far"
+				pl[#pl + 1] = (it.p.DisplayName or it.p.Name) .. ": " .. Smart.rel(pr.aff) .. " (" .. string.format("%+d", math.floor(pr.aff + 0.5)) .. "), " .. (pr.n or 0) .. " messages so far" .. ((pr.facts and #pr.facts > 0) and ("; you know that they said: " .. table.concat(pr.facts, "; ")) or "")
 			end
 		end
 		sys = sys .. "\n\n[How you feel about the people talking]\n" .. table.concat(pl, "\n")
@@ -1937,6 +1977,10 @@ Use "respond":false and "reply":"" when you stay quiet. "emotion" is how you fee
 		local wb = World.chatBlock and World.chatBlock(items)
 		if wb then
 			sys = sys .. "\n\n[What you can see and hear]\n" .. wb
+		end
+		local lsn = World.lessonsText and World.lessonsText(4, keywords(items[1].cleaned).list) or ""
+		if lsn ~= "" then
+			sys = sys .. "\n\n[What you have learned about this game]\n" .. lsn
 		end
 		local recent, related = context(items)
 		if #recent > 0 then
@@ -2458,6 +2502,13 @@ do
 		if me.pos then
 			L[#L + 1] = "You are at (" .. r0(me.pos.X) .. "," .. r0(me.pos.Y) .. "," .. r0(me.pos.Z) .. ")" .. (me.state and (", " .. me.state:lower()) or "") .. (me.holding and (", holding " .. me.holding) or "") .. (me.sit and (", sitting on " .. me.sit) or "")
 		end
+		local hud = World.hud()
+		if hud ~= "" then
+			L[#L + 1] = hud
+		end
+		if World.walkNote and World.walkNote ~= "" then
+			L[#L + 1] = World.walkNote
+		end
 		if cfg.WorldSight then
 			if #snap.players > 0 then
 				L[#L + 1] = "Players:"
@@ -2474,6 +2525,14 @@ do
 					b[#b + 1] = g.name .. " (" .. g.class .. ", " .. g.n .. " parts, " .. r0(g.dist) .. " studs" .. (g.size and (", " .. g.size) or "") .. ")"
 				end
 				L[#L + 1] = "Nearby buildings and objects: " .. table.concat(b, "; ")
+			end
+			local sct = World.screen(16)
+			if #sct > 0 then
+				local b = {}
+				for _, it in ipairs(sct) do
+					b[#b + 1] = it.kind .. ' "' .. it.text .. '"'
+				end
+				L[#L + 1] = "On screen: " .. table.concat(b, "; ")
 			end
 			if #snap.npcs > 0 then
 				local b = {}
@@ -2563,6 +2622,10 @@ do
 			local n = World.notes()
 			if n ~= "" then
 				parts[#parts + 1] = "Game notes: " .. n
+			end
+			local ls = World.lessonsText(4, kws)
+			if ls ~= "" then
+				parts[#parts + 1] = "What you have learned:\n" .. ls
 			end
 			for _, e in ipairs(World.search(kws, 3)) do
 				parts[#parts + 1] = "Remembered: " .. e.m
@@ -2836,6 +2899,180 @@ do
 		return true, text
 	end
 
+	------------------------------------------------------------ everything on screen, stats, and fast learning
+	function World.screen(max)
+		local items = {}
+		local pg = lp:FindFirstChildOfClass("PlayerGui")
+		if not pg then
+			return items
+		end
+		pcall(function()
+			for _, d in ipairs(pg:GetDescendants()) do
+				if d:IsA("GuiObject") and not (World.ownGui and d:IsDescendantOf(World.ownGui)) and visibleChain(d) then
+					local sz, ps = d.AbsoluteSize, d.AbsolutePosition
+					if sz.X > 2 and sz.Y > 2 then
+						local kind, text
+						if d:IsA("TextButton") then
+							kind, text = "button", d.Text
+						elseif d:IsA("TextBox") then
+							kind, text = "input", (d.Text ~= "" and d.Text or d.PlaceholderText)
+						elseif d:IsA("TextLabel") then
+							kind, text = "text", d.Text
+						elseif d:IsA("ImageButton") then
+							kind, text = "image button", d.Name
+						end
+						text = text and trimChars(oneLine(tostring(text)), 60)
+						if text and text ~= "" then
+							local sg = d:FindFirstAncestorOfClass("ScreenGui")
+							local off = (sg and sg.IgnoreGuiInset) and 0 or insetY()
+							items[#items + 1] = { kind = kind, text = text, x = ps.X + sz.X / 2, y = ps.Y + sz.Y / 2 + off, w = sz.X, h = sz.Y, obj = d }
+						end
+					end
+				end
+			end
+		end)
+		table.sort(items, function(a, b)
+			if math.abs(a.y - b.y) > 12 then
+				return a.y < b.y
+			end
+			return a.x < b.x
+		end)
+		local out, seen = {}, {}
+		for _, it in ipairs(items) do
+			local key = it.kind .. it.text
+			if not seen[key] and #out < (max or 30) then
+				seen[key] = true
+				out[#out + 1] = it
+			end
+		end
+		return out
+	end
+
+	function World.hud()
+		local bits = {}
+		pcall(function()
+			local ls = lp:FindFirstChild("leaderstats")
+			if ls then
+				local st = {}
+				for _, v in ipairs(ls:GetChildren()) do
+					local ok, val = pcall(function()
+						return v.Value
+					end)
+					if ok and val ~= nil then
+						st[#st + 1] = v.Name .. " " .. tostring(val)
+					end
+				end
+				if #st > 0 then
+					bits[#bits + 1] = "Your stats: " .. table.concat(st, ", ")
+				end
+			end
+			local bp = lp:FindFirstChildOfClass("Backpack")
+			if bp then
+				local inv = {}
+				for _, t in ipairs(bp:GetChildren()) do
+					if #inv < 10 then
+						inv[#inv + 1] = t.Name
+					end
+				end
+				if #inv > 0 then
+					bits[#bits + 1] = "Inventory: " .. table.concat(inv, ", ")
+				end
+			end
+		end)
+		return table.concat(bits, "; ")
+	end
+
+	-- lessons: short rules the AI wrote down about this game, learned quickly from what it sees and does
+	local Lessons
+	local function loadLessons()
+		if Lessons == nil then
+			loadStore()
+			local l = readJson(wpath("lessons.json"), {})
+			Lessons = type(l) == "table" and l or {}
+			if type(Lessons.items) ~= "table" then
+				Lessons.items = {}
+			end
+			Lessons.evs, Lessons.at = tonumber(Lessons.evs) or 0, tonumber(Lessons.at) or 0
+		end
+	end
+	function World.lesson(text)
+		loadLessons()
+		text = trimChars(oneLine(tostring(text)), 160)
+		if #text < 8 then
+			return false
+		end
+		local kw = keywords(text)
+		for _, it in ipairs(Lessons.items) do
+			if it.m:lower() == text:lower() or jaccard(kw.set, keywords(it.m).set) > 0.7 then
+				return false
+			end
+		end
+		Lessons.items[#Lessons.items + 1] = { t = os.time(), m = text }
+		while #Lessons.items > 40 do
+			table.remove(Lessons.items, 1)
+		end
+		writeJson(wpath("lessons.json"), Lessons)
+		return true
+	end
+	function World.lessonList()
+		loadLessons()
+		return Lessons.items
+	end
+	function World.lessonsText(n, kws)
+		loadLessons()
+		local scored = {}
+		for i, it in ipairs(Lessons.items) do
+			local low, hit = it.m:lower(), 0
+			for _, w in ipairs(kws or {}) do
+				if low:find(w, 1, true) then
+					hit = hit + 1
+				end
+			end
+			scored[#scored + 1] = { m = it.m, s = hit * 100 + i }
+		end
+		table.sort(scored, function(a, b)
+			return a.s > b.s
+		end)
+		local out = {}
+		for i = 1, math.min(n or 4, #scored) do
+			out[#out + 1] = "- " .. scored[i].m
+		end
+		return table.concat(out, "\n")
+	end
+	local baseWipe = World.wipe
+	function World.wipe()
+		baseWipe()
+		Notes, Lessons = nil, nil
+		writeJson(wpath("notes.json"), {})
+		writeJson(wpath("lessons.json"), {})
+	end
+	local REFLECT_SYS = "You are the learning part of an AI that plays Roblox. From the recent events and the lessons it already knows, write up to 4 NEW short lessons, one per line starting with '- ': how this game works, what objects do, what players like, what worked or failed. Skip anything already known. If there is nothing new reply with NONE."
+	function World.reflect()
+		loadStore()
+		loadLessons()
+		local rec = {}
+		for i = math.max(1, #W.recent - 29), #W.recent do
+			rec[#rec + 1] = W.recent[i].m
+		end
+		local known = {}
+		for i = math.max(1, #Lessons.items - 11), #Lessons.items do
+			known[#known + 1] = "- " .. Lessons.items[i].m
+		end
+		local text = askRaw(REFLECT_SYS, "Known lessons:\n" .. table.concat(known, "\n") .. "\n\nRecent events:\n" .. table.concat(rec, "\n"), 260, "world", true)
+		Lessons.evs, Lessons.at = W.idx.count, os.time()
+		local n = 0
+		if text then
+			for line in text:gmatch("[^\n]+") do
+				local l = line:match("^%s*[%-%*â€¢]%s*(.+)")
+				if l and World.lesson(l) then
+					n = n + 1
+				end
+			end
+		end
+		writeJson(wpath("lessons.json"), Lessons)
+		return n
+	end
+
 	------------------------------------------------------------ watching: turns scans into memories
 	local last = { hold = {}, sit = {}, emote = {}, pack = {}, snd = {}, pend = {}, seen = {} }
 	local seenCount = 0
@@ -2918,7 +3155,7 @@ do
 		end
 	end
 
-	local started, learning = false, false
+	local started, learning, reflecting = false, false, false
 	function World.start()
 		if started then
 			return
@@ -2956,12 +3193,22 @@ do
 				pcall(tick)
 				if cfg.WorldSight and not learning and #Keys.active() > 0 then
 					loadNotes()
-					local due = (Notes.at == nil and os.clock() > 25) or (W.idx.count - (Notes.evs or 0) >= 80 and os.time() - (Notes.at or 0) > 1200)
+					local due = (Notes.at == nil and os.clock() > 10) or (W.idx.count - math.min(Notes.evs or 0, W.idx.count) >= 25 and os.time() - (Notes.at or 0) > 300)
 					if due then
 						learning = true
 						task.spawn(function()
 							pcall(World.learn)
 							learning = false
+						end)
+					end
+				end
+				if #Keys.active() > 0 and not reflecting then
+					loadLessons()
+					if W.idx.count - math.min(Lessons.evs, W.idx.count) >= 15 and os.time() - Lessons.at > 90 then
+						reflecting = true
+						task.spawn(function()
+							pcall(World.reflect)
+							reflecting = false
 						end)
 					end
 				end
@@ -2988,19 +3235,46 @@ do
 	local function saveProfile()
 		writeJson("mouse_profile.json", M.profile)
 	end
-	local function mlog(msg)
+	local function mlog(msg, quiet)
 		M.log[#M.log + 1] = msg
 		while #M.log > 12 do
 			table.remove(M.log, 1)
 		end
-		status(msg)
+		if not quiet then
+			status(msg)
+		end
 		if M.onLog then
 			pcall(M.onLog)
 		end
 	end
+	local function finite(n)
+		return type(n) == "number" and n == n and n > -1e7 and n < 1e7
+	end
 	local function viewport()
 		local c = cam()
-		return c and c.ViewportSize or Vector2.new(800, 400)
+		local v = c and c.ViewportSize
+		if v and v.X > 0 and v.Y > 0 then
+			return v
+		end
+		return Vector2.new(800, 400)
+	end
+	-- the space the cursor lives in: our own full-screen ScreenGui, so the picture can never leave the screen
+	local function screen()
+		local ok, s2 = pcall(function()
+			return M.gui.AbsoluteSize
+		end)
+		if ok and s2 and s2.X > 50 and s2.Y > 50 then
+			return s2
+		end
+		return viewport()
+	end
+	World.screenSize = screen
+	-- gui space -> the numbers the engine's input expects
+	local function toInput(x, y)
+		local vp, sc = viewport(), screen()
+		local fx = sc.X > 0 and vp.X / sc.X or 1
+		local fy = sc.Y > 0 and vp.Y / sc.Y or 1
+		return x * fx, y * fy + M.offY
 	end
 
 	function M.attach(gui, win, fab)
@@ -3025,6 +3299,16 @@ do
 		c.Visible = cfg.CursorVisible and cfg.MouseMode ~= "Off"
 		c.Parent = gui
 		M.cursor = c
+		-- keeps the cursor on screen no matter what
+		task.spawn(function()
+			while Alive do
+				task.wait(1)
+				local sc = screen()
+				if not (finite(M.x) and finite(M.y)) or M.x < 0 or M.y < 0 or M.x > sc.X or M.y > sc.Y then
+					M.recenter()
+				end
+			end
+		end)
 	end
 	function M.refreshCursor()
 		if M.cursor then
@@ -3033,7 +3317,7 @@ do
 	end
 
 	-- the AI may never touch its own window, Roblox's menus, or anything that spends Robux
-	local RISK = { "buy", "purchase", "robux", "r%$", "gamepass", "game pass", "premium", "subscribe", "donate", "checkout", "pay " }
+	local RISK = { "robux", "r%$", "gamepass", "game pass", "premium", "subscribe", "donate" }
 	local function riskyText(t)
 		t = " " .. tostring(t):lower() .. " "
 		for _, w in ipairs(RISK) do
@@ -3084,10 +3368,12 @@ do
 		end
 		local blocked, why
 		pcall(function()
+			local vp, sc = viewport(), screen()
+			local qx, qy = x * (vp.X / sc.X), y * (vp.Y / sc.Y)
 			if CoreGui then
-				for _, yy in ipairs({ y, y - inset }) do
+				for _, yy in ipairs({ qy, qy - inset }) do
 					local ok, objs = pcall(function()
-						return CoreGui:GetGuiObjectsAtPosition(x, yy)
+						return CoreGui:GetGuiObjectsAtPosition(qx, yy)
 					end)
 					if ok and type(objs) == "table" then
 						for _, o in ipairs(objs) do
@@ -3102,14 +3388,14 @@ do
 			end
 			local pg = lp:FindFirstChildOfClass("PlayerGui")
 			if pg then
-				for _, yy in ipairs({ y, y - inset }) do
+				for _, yy in ipairs({ qy, qy - inset }) do
 					local ok, objs = pcall(function()
-						return pg:GetGuiObjectsAtPosition(x, yy)
+						return pg:GetGuiObjectsAtPosition(qx, yy)
 					end)
 					if ok and type(objs) == "table" then
 						for _, o in ipairs(objs) do
 							if riskyGui(o) then
-								blocked, why = true, "that looks like a purchase button"
+								blocked, why = true, "that looks like a Robux purchase button"
 								return
 							end
 						end
@@ -3123,22 +3409,38 @@ do
 		return true
 	end
 
-	-- cursor movement (the picture and, if the executor allows it, the real engine mouse)
+	-- cursor movement: the picture always, the real engine mouse when it works
 	function M.setPos(x, y)
+		local sc = screen()
+		if not (finite(x) and finite(y)) then
+			x, y = sc.X / 2, sc.Y / 2
+		end
+		x, y = math.clamp(x, 2, sc.X - 2), math.clamp(y, 2, sc.Y - 2)
 		M.x, M.y = x, y
 		if M.cursor then
 			M.cursor.Position = UDim2.fromOffset(x, y)
 		end
 		if VIM and M.engine ~= false then
+			local ix, iy = toInput(x, y)
 			pcall(function()
-				VIM:SendMouseMoveEvent(x, y + M.offY, game)
+				VIM:SendMouseMoveEvent(ix, iy, game)
 			end)
 		end
 	end
+	function M.recenter()
+		local sc = screen()
+		M.setPos(sc.X / 2, sc.Y / 2)
+	end
 	function M.moveTo(x, y, dur)
-		local vp = viewport()
-		x, y = math.clamp(x, 0, vp.X - 1), math.clamp(y, 0, vp.Y - 1)
+		local sc = screen()
+		if not (finite(x) and finite(y)) then
+			return
+		end
+		x, y = math.clamp(x, 2, sc.X - 2), math.clamp(y, 2, sc.Y - 2)
 		local sx, sy = M.x, M.y
+		if not (finite(sx) and finite(sy)) then
+			sx, sy = sc.X / 2, sc.Y / 2
+		end
 		dur = dur or math.clamp(math.sqrt((x - sx) ^ 2 + (y - sy) ^ 2) / 900, 0.12, 0.7)
 		local steps = math.max(2, math.floor(dur / 0.05))
 		for i = 1, steps do
@@ -3150,6 +3452,7 @@ do
 		M.setPos(x, y)
 	end
 
+	------------------------------------------------------------ ways to click, tried in the order that has worked best
 	local function fireBtn(btn)
 		local fired = false
 		if type(firesignal) == "function" then
@@ -3170,142 +3473,151 @@ do
 		return fired
 	end
 
-	-- a real click at the cursor; falls back to direct firing when the engine mouse is unavailable
-	function M.click(button)
-		local ok, why = M.safeAt(M.x, M.y)
-		if not ok then
-			return false, why
-		end
-		local b = (button == "right") and 1 or 0
-		if VIM and M.engine ~= false then
-			local sent = pcall(function()
-				VIM:SendMouseButtonEvent(M.x, M.y + M.offY, b, true, game, 0)
-				task.wait(0.06)
-				VIM:SendMouseButtonEvent(M.x, M.y + M.offY, b, false, game, 0)
-			end)
-			if sent then
-				return true, "engine"
-			end
-		end
-		-- fallback: find what is under the cursor and fire it directly
+	local function firePoint(x, y)
+		local vp, sc = viewport(), screen()
+		local qx, qy = x * (vp.X / sc.X), y * (vp.Y / sc.Y)
 		local pg = lp:FindFirstChildOfClass("PlayerGui")
 		local inset = insetY()
 		if pg then
-			for _, yy in ipairs({ M.y, M.y - inset }) do
+			for _, yy in ipairs({ qy, qy - inset }) do
 				local okq, objs = pcall(function()
-					return pg:GetGuiObjectsAtPosition(M.x, yy)
+					return pg:GetGuiObjectsAtPosition(qx, yy)
 				end)
 				if okq and type(objs) == "table" then
 					for _, o in ipairs(objs) do
 						if o:IsA("GuiButton") and fireBtn(o) then
-							return true, "fire"
+							return true
 						end
 					end
 				end
 			end
 		end
-		local c = cam()
-		local okr = pcall(function()
-			local ray = c:ViewportPointToRay(M.x, M.y)
+		local done = false
+		pcall(function()
+			local ray = cam():ViewportPointToRay(qx, qy)
 			local rp = RaycastParams.new()
 			rp.FilterType = Enum.RaycastFilterType.Exclude
 			rp.FilterDescendantsInstances = { lp.Character }
 			local hit = workspace:Raycast(ray.Origin, ray.Direction * 500, rp)
-			if hit and hit.Instance then
-				local x2 = hit.Instance
-				for _ = 1, 4 do
-					if not x2 then
-						break
-					end
-					local cd = x2:FindFirstChildOfClass("ClickDetector")
-					if cd and fireclickdetector then
-						fireclickdetector(cd)
-						error("done")
-					end
-					local pp = x2:FindFirstChildOfClass("ProximityPrompt")
-					if pp and fireproximityprompt then
-						fireproximityprompt(pp)
-						error("done")
-					end
-					x2 = x2.Parent
+			local x2 = hit and hit.Instance
+			for _ = 1, 4 do
+				if not x2 then
+					break
 				end
+				local cd = x2:FindFirstChildOfClass("ClickDetector")
+				if cd and fireclickdetector then
+					fireclickdetector(cd)
+					done = true
+					break
+				end
+				local pp = x2:FindFirstChildOfClass("ProximityPrompt")
+				if pp and fireproximityprompt then
+					fireproximityprompt(pp)
+					done = true
+					break
+				end
+				x2 = x2.Parent
 			end
 		end)
-		if not okr then
-			return true, "fire"
+		if done then
+			return true
 		end
 		local tool = lp.Character and lp.Character:FindFirstChildOfClass("Tool")
 		if tool then
 			pcall(function()
 				tool:Activate()
 			end)
-			return true, "tool"
-		end
-		return false, "nothing to click there"
-	end
-
-	function M.scroll(n)
-		if VIM and M.engine ~= false then
-			for _ = 1, math.min(10, math.abs(n)) do
-				pcall(function()
-					VIM:SendMouseWheelEvent(M.x, M.y + M.offY, n > 0, game)
-				end)
-				task.wait(0.05)
-			end
 			return true
 		end
 		return false
 	end
 
-	-- things the AI can point at; ids like g1 (screen button), p1 (prompt), c1 (clickable), s1 (seat)
-	function M.targets()
-		local list, byId, n = {}, {}, { g = 0, p = 0, c = 0, s = 0 }
-		local function add(pre, t)
-			n[pre] = n[pre] + 1
-			t.id = pre .. n[pre]
-			list[#list + 1] = t
-			byId[t.id] = t
+	local function fireTarget(tgt, x, y)
+		if tgt then
+			if tgt.kind == "button" and tgt.obj then
+				return fireBtn(tgt.obj)
+			end
+			if tgt.kind == "click" and fireclickdetector then
+				return (pcall(fireclickdetector, tgt.obj))
+			end
+			if tgt.kind == "model" and tgt.obj then
+				local ok = false
+				pcall(function()
+					for i, d in ipairs(tgt.obj:GetDescendants()) do
+						if i > 400 then
+							break
+						end
+						if d:IsA("ClickDetector") and fireclickdetector then
+							fireclickdetector(d)
+							ok = true
+							return
+						end
+						if d:IsA("ProximityPrompt") and fireproximityprompt then
+							fireproximityprompt(d)
+							ok = true
+							return
+						end
+					end
+				end)
+				if ok then
+					return true
+				end
+			end
 		end
-		for _, g in ipairs(World.guiButtons(14)) do
-			add("g", { kind = "button", obj = g.obj, label = g.text ~= "" and g.text or g.obj.Name, x = g.x, y = g.y })
-		end
-		local snap = World.get(2)
-		for _, pr in ipairs(snap.prompts) do
-			local pre = pr.kind == "prompt" and "p" or (pr.kind == "click" and "c" or "s")
-			add(pre, { kind = pr.kind, obj = pr.obj, label = ((pr.kind == "prompt" and pr.text ~= "") and pr.text or pr.kind) .. " on " .. pr.name, dist = pr.dist, pos = pr.pos })
-		end
-		M.byId = byId
-		return list
-	end
-	function M.screenOf(t)
-		if t.x then
-			return t.x, t.y
-		end
-		local ok, v, on = pcall(function()
-			return cam():WorldToViewportPoint(t.pos)
-		end)
-		if ok and on and v.Z > 0 then
-			return v.X, v.Y
-		end
-		return nil
+		return firePoint(x, y)
 	end
 
-	function M.observe()
-		local vp = viewport()
-		local L = { "Screen " .. r0(vp.X) .. "x" .. r0(vp.Y) .. ". Cursor at (" .. r0(M.x) .. "," .. r0(M.y) .. ")." }
-		pcall(function()
-			local tgt = lp:GetMouse().Target
-			if tgt then
-				L[#L + 1] = "Under the cursor: " .. tgt.Name
-			end
-		end)
-		L[#L + 1] = "Targets (use these ids):"
-		for _, t in ipairs(M.targets()) do
-			local sx, sy = M.screenOf(t)
-			L[#L + 1] = "  " .. t.id .. " " .. t.kind .. ' "' .. t.label .. '"' .. (t.dist and (" " .. r0(t.dist) .. " studs") or "") .. (sx and (" at (" .. r0(sx) .. "," .. r0(sy) .. ")") or " off-screen")
+	local function available(method, tgt)
+		if method == "engine" then
+			return VIM ~= nil and M.engine ~= false
+		elseif method == "touch" then
+			return VIM ~= nil and M.profile.touch ~= false
 		end
-		L[#L + 1] = World.describe({ budget = 600, maxAge = 2 })
-		return table.concat(L, "\n")
+		if tgt and tgt.kind == "button" then
+			return type(firesignal) == "function" or type(getconnections) == "function"
+		end
+		return true
+	end
+
+	local function methodOrder(kind, tgt)
+		local list = {}
+		for _, m in ipairs({ "engine", "touch", "fire" }) do
+			if available(m, tgt) then
+				local sk = M.profile.skills[kind .. ":" .. m]
+				list[#list + 1] = { m = m, s = ((sk and sk.ok or 0) + 1) / ((sk and sk.n or 0) + 2), i = #list }
+			end
+		end
+		table.sort(list, function(a, b)
+			if math.abs(a.s - b.s) > 0.01 then
+				return a.s > b.s
+			end
+			return a.i < b.i
+		end)
+		local out = {}
+		for _, e in ipairs(list) do
+			out[#out + 1] = e.m
+		end
+		return out
+	end
+
+	local touchId = 7
+	local function perform(method, x, y, tgt, button)
+		local ix, iy = toInput(x, y)
+		if method == "engine" then
+			local b = (button == "right") and 1 or 0
+			return (pcall(function()
+				VIM:SendMouseButtonEvent(ix, iy, b, true, game, 0)
+				task.wait(0.06)
+				VIM:SendMouseButtonEvent(ix, iy, b, false, game, 0)
+			end))
+		elseif method == "touch" then
+			return (pcall(function()
+				VIM:SendTouchEvent(touchId, 0, ix, iy)
+				task.wait(0.06)
+				VIM:SendTouchEvent(touchId, 2, ix, iy)
+			end))
+		end
+		return fireTarget(tgt, x, y)
 	end
 
 	local function stateOf()
@@ -3320,10 +3632,8 @@ do
 		end
 		local tool = lp.Character and lp.Character:FindFirstChildOfClass("Tool")
 		st.tool = tool and tool.Name or ""
-		for _, g in ipairs(World.guiButtons(40)) do
-			if g.text ~= "" then
-				st.btn[g.text] = true
-			end
+		for _, it in ipairs(World.screen(60)) do
+			st.btn[it.kind .. ":" .. it.text] = true
 		end
 		for s2 in pairs(Idx.sound) do
 			if s2.IsPlaying then
@@ -3346,19 +3656,19 @@ do
 		local new, gone = {}, {}
 		for t in pairs(b.btn) do
 			if not a.btn[t] then
-				new[#new + 1] = t
+				new[#new + 1] = (t:gsub("^[^:]*:", ""))
 			end
 		end
 		for t in pairs(a.btn) do
 			if not b.btn[t] then
-				gone[#gone + 1] = t
+				gone[#gone + 1] = (t:gsub("^[^:]*:", ""))
 			end
 		end
 		if #new > 0 then
-			bits[#bits + 1] = "new buttons: " .. table.concat(new, ", ", 1, math.min(#new, 4))
+			bits[#bits + 1] = "now on screen: " .. table.concat(new, ", ", 1, math.min(#new, 4))
 		end
 		if #gone > 0 then
-			bits[#bits + 1] = "buttons gone: " .. table.concat(gone, ", ", 1, math.min(#gone, 4))
+			bits[#bits + 1] = "no longer on screen: " .. table.concat(gone, ", ", 1, math.min(#gone, 4))
 		end
 		if a.snd ~= b.snd then
 			bits[#bits + 1] = "sounds playing " .. a.snd .. " to " .. b.snd
@@ -3369,16 +3679,20 @@ do
 		return table.concat(bits, "; "), true
 	end
 
-	local function learnFrom(kind, label, method, outcome, ok)
-		local key = kind .. ":" .. method
+	local function learnStat(kind, m, changed)
+		local key = kind .. ":" .. m
 		local sk = M.profile.skills[key] or { ok = 0, n = 0 }
 		sk.n = sk.n + 1
-		if ok then
+		if changed then
 			sk.ok = sk.ok + 1
 		end
 		M.profile.skills[key] = sk
 		saveProfile()
-		World.add("mouse", ("Mouse: %s on %s via %s -> %s"):format(kind, label, method, outcome))
+		if changed and sk.ok == 1 then
+			World.lesson(("Clicking a %s target works with the %s method on this device"):format(kind, m))
+		elseif sk.n == 2 and sk.ok == 0 then
+			World.lesson(("The %s click method does nothing for %s targets here, try another method first"):format(m, kind))
+		end
 	end
 	function M.skillsText()
 		local out = {}
@@ -3387,6 +3701,137 @@ do
 		end
 		table.sort(out)
 		return #out > 0 and table.concat(out, ", ") or "none yet"
+	end
+
+	-- one click that checks itself: if nothing changed, the next method is tried
+	function M.clickAt(x, y, tgt, button)
+		local kind = tgt and tgt.kind or "point"
+		local order = methodOrder(kind, tgt)
+		if #order == 0 then
+			return nil, "no way to click here", false
+		end
+		local expect = tgt ~= nil
+		local tried = {}
+		for _, m in ipairs(order) do
+			local before = stateOf()
+			local ok = perform(m, x, y, tgt, button)
+			if ok then
+				tried[#tried + 1] = m
+				task.wait(0.5)
+				local outcome, changed = diff(before, stateOf())
+				learnStat(kind, m, changed)
+				if changed or not expect then
+					return m, outcome, changed
+				end
+			end
+		end
+		if #tried == 0 then
+			return nil, "every click method failed", false
+		end
+		return tried[#tried], "no visible change after trying " .. table.concat(tried, ", "), false
+	end
+
+	function M.click(button)
+		local ok, why = M.safeAt(M.x, M.y)
+		if not ok then
+			return false, why
+		end
+		local m, outcome = M.clickAt(M.x, M.y, nil, button)
+		return m ~= nil, m or outcome
+	end
+
+	function M.scroll(n)
+		if VIM and M.engine ~= false then
+			for _ = 1, math.min(10, math.abs(n)) do
+				local ix, iy = toInput(M.x, M.y)
+				pcall(function()
+					VIM:SendMouseWheelEvent(ix, iy, n > 0, game)
+				end)
+				task.wait(0.05)
+			end
+			return true
+		end
+		return false
+	end
+
+	------------------------------------------------------------ what the AI can point at
+	-- ids: g button on screen, p prompt, c clickable, s seat, m building or object in the world
+	function M.targets()
+		local list, byId, n = {}, {}, { g = 0, p = 0, c = 0, s = 0, m = 0 }
+		local function add(pre, t)
+			n[pre] = n[pre] + 1
+			t.id = pre .. n[pre]
+			list[#list + 1] = t
+			byId[t.id] = t
+		end
+		for _, g in ipairs(World.guiButtons(14)) do
+			add("g", { kind = "button", obj = g.obj, label = g.text ~= "" and g.text or g.obj.Name, x = g.x, y = g.y })
+		end
+		local snap = World.get(2)
+		for _, pr in ipairs(snap.prompts) do
+			local pre = pr.kind == "prompt" and "p" or (pr.kind == "click" and "c" or "s")
+			add(pre, { kind = pr.kind, obj = pr.obj, label = ((pr.kind == "prompt" and pr.text ~= "") and pr.text or pr.kind) .. " on " .. pr.name, dist = pr.dist, pos = pr.pos })
+		end
+		for i, g in ipairs(snap.near) do
+			if i <= 4 and g.dist < 90 then
+				local p3 = posOf(g.obj) or Vector3.new(g.x, 0, g.z)
+				add("m", { kind = "model", obj = g.obj, label = g.name, dist = g.dist, pos = p3 })
+			end
+		end
+		M.byId = byId
+		return list
+	end
+	function M.screenOf(t)
+		if t.x then
+			return t.x, t.y
+		end
+		local ok, v, on = pcall(function()
+			return cam():WorldToViewportPoint(t.pos)
+		end)
+		if ok and on and v.Z > 0 then
+			local vp, sc = viewport(), screen()
+			return v.X * (sc.X / vp.X), v.Y * (sc.Y / vp.Y)
+		end
+		return nil
+	end
+
+	-- everything the AI knows about the screen right now
+	function M.observe()
+		local sc = screen()
+		local L = { "Screen size " .. r0(sc.X) .. "x" .. r0(sc.Y) .. " pixels (x goes right, y goes down). Your cursor is at (" .. r0(M.x) .. "," .. r0(M.y) .. ")." }
+		pcall(function()
+			local vp = viewport()
+			local pg = lp:FindFirstChildOfClass("PlayerGui")
+			if pg then
+				local objs = pg:GetGuiObjectsAtPosition(M.x * (vp.X / sc.X), (M.y * (vp.Y / sc.Y)) - insetY())
+				for _, o in ipairs(objs) do
+					if not (World.ownGui and o:IsDescendantOf(World.ownGui)) then
+						local t = (o:IsA("TextButton") or o:IsA("TextLabel")) and o.Text or o.Name
+						L[#L + 1] = "Under the cursor (screen): " .. o.ClassName .. ' "' .. trimChars(tostring(t), 40) .. '"'
+						break
+					end
+				end
+			end
+			local tgt = lp:GetMouse().Target
+			if tgt then
+				L[#L + 1] = "Under the cursor (world): " .. tgt.Name
+			end
+		end)
+		L[#L + 1] = "Targets you can use by id:"
+		for _, t in ipairs(M.targets()) do
+			local sx, sy = M.screenOf(t)
+			L[#L + 1] = "  " .. t.id .. " " .. t.kind .. ' "' .. t.label .. '"' .. (t.dist and (" " .. r0(t.dist) .. " studs") or "") .. (sx and (" at (" .. r0(sx) .. "," .. r0(sy) .. ")") or " off-screen")
+		end
+		local sct = World.screen(22)
+		if #sct > 0 then
+			local b = {}
+			for _, it in ipairs(sct) do
+				b[#b + 1] = it.kind .. ' "' .. it.text .. '" (' .. r0(it.x) .. "," .. r0(it.y) .. ")"
+			end
+			L[#L + 1] = "Everything readable on screen: " .. table.concat(b, "; ")
+		end
+		L[#L + 1] = World.describe({ budget = 700, maxAge = 2 })
+		return table.concat(L, "\n")
 	end
 
 	local function walkTo(pos)
@@ -3403,19 +3848,40 @@ do
 		return true
 	end
 
+	local function learnFrom(kind, label, method, outcome, ok)
+		World.add("mouse", ("Mouse: %s on %s via %s -> %s"):format(kind, label, method, outcome))
+	end
+
 	-- do one action; returns a sentence describing what happened
 	function M.act(a)
 		local d = tostring(a["do"] or a.action or ""):lower()
-		local alias = { leftclick = "click", left = "click", rightclick = "rightclick", right = "rightclick", doubleclick = "doubleclick", double = "doubleclick", move = "move", hover = "move", drag = "drag", scroll = "scroll", wait = "wait", face = "face", walk = "walk", interact = "click", press = "click", use = "click" }
+		local alias = { leftclick = "click", left = "click", rightclick = "rightclick", right = "rightclick", doubleclick = "doubleclick", double = "doubleclick", move = "move", hover = "move", drag = "drag", scroll = "scroll", wait = "wait", face = "face", walk = "walk", interact = "click", press = "click", use = "click", tap = "click" }
 		d = alias[d] or d
 		local tgt = a.target and M.byId[tostring(a.target)] or nil
 		if a.target and not tgt then
 			return "unknown target " .. tostring(a.target)
 		end
-		local x, y = tonumber(a.x), tonumber(a.y)
+		local sc = screen()
+		local function coords(px, py)
+			px, py = tonumber(px), tonumber(py)
+			if not (px and py) then
+				return nil
+			end
+			if px >= 0 and px <= 1 and py >= 0 and py <= 1 then
+				return px * sc.X, py * sc.Y -- fractions of the screen
+			end
+			if not (finite(px) and finite(py)) or px < 0 or py < 0 or px > sc.X * 1.05 or py > sc.Y * 1.05 then
+				return false
+			end
+			return px, py
+		end
+		local x, y = coords(a.x, a.y)
+		if x == false then
+			return "refused: (" .. tostring(a.x) .. "," .. tostring(a.y) .. ") is off the screen, which is " .. r0(sc.X) .. "x" .. r0(sc.Y) .. " pixels"
+		end
 		if tgt then
-			if M.riskyText(tgt.label) or (tgt.obj and riskyGui(tgt.obj) and tgt.kind == "button") then
-				return "refused: " .. tgt.label .. " looks like something that costs Robux"
+			if M.riskyText(tgt.label) or (tgt.obj and tgt.kind == "button" and riskyGui(tgt.obj)) then
+				return "refused: " .. tgt.label .. " costs Robux, and this script never spends Robux"
 			end
 			x, y = M.screenOf(tgt)
 		end
@@ -3461,9 +3927,9 @@ do
 			return "moved the cursor to (" .. r0(x) .. "," .. r0(y) .. ")"
 		end
 		if d == "drag" then
-			local x2, y2 = tonumber(a.to_x), tonumber(a.to_y)
-			if not (x2 and y2) then
-				return "drag needs to_x and to_y"
+			local x2, y2 = coords(a.to_x, a.to_y)
+			if not x2 then
+				return "drag needs valid to_x and to_y inside the screen"
 			end
 			local ok1 = M.safeAt(x, y)
 			local ok2 = M.safeAt(x2, y2)
@@ -3472,27 +3938,29 @@ do
 			end
 			M.moveTo(x, y)
 			if VIM then
+				local ix, iy = toInput(M.x, M.y)
 				pcall(function()
-					VIM:SendMouseButtonEvent(M.x, M.y + M.offY, 0, true, game, 0)
+					VIM:SendMouseButtonEvent(ix, iy, 0, true, game, 0)
 				end)
 				M.moveTo(x2, y2, 0.5)
+				ix, iy = toInput(M.x, M.y)
 				pcall(function()
-					VIM:SendMouseButtonEvent(M.x, M.y + M.offY, 0, false, game, 0)
+					VIM:SendMouseButtonEvent(ix, iy, 0, false, game, 0)
 				end)
 				return "dragged to (" .. r0(x2) .. "," .. r0(y2) .. ")"
 			end
 			return "dragging isn't supported here"
 		end
 		if d == "click" or d == "rightclick" or d == "doubleclick" then
-			local before = stateOf()
 			local label = tgt and tgt.label or ("(" .. r0(x) .. "," .. r0(y) .. ")")
 			local kind = tgt and tgt.kind or "point"
-			local method, okc, why
 			if tgt and tgt.kind == "prompt" then
+				local before = stateOf()
 				local pp = tgt.obj
 				if tgt.dist and tgt.dist > (pp.MaxActivationDistance or 10) + 2 then
 					return "too far from " .. label .. ", walk closer first"
 				end
+				local okc, method
 				if type(fireproximityprompt) == "function" then
 					okc, method = pcall(fireproximityprompt, pp), "fire"
 				elseif VIM then
@@ -3502,29 +3970,31 @@ do
 						VIM:SendKeyEvent(false, pp.KeyboardKeyCode, false, game)
 					end), "key"
 				end
+				task.wait(0.6)
+				local outcome, changed = diff(before, stateOf())
+				learnFrom(kind, label, method or "?", outcome, okc)
+				learnStat("prompt", method or "?", changed or (okc and true))
+				return "interact with " .. label .. " via " .. tostring(method) .. ": " .. outcome
 			elseif tgt and tgt.kind == "seat" then
 				walkTo(tgt.pos)
-				okc, method = true, "walk"
-			else
-				local ok, why2 = M.safeAt(x, y)
-				if not ok then
-					return "refused: " .. why2
-				end
-				M.moveTo(x, y)
-				okc, why = M.click(d == "rightclick" and "right" or "left")
-				method = why
-				if d == "doubleclick" and okc then
-					task.wait(0.1)
-					M.click("left")
-				end
-				if not okc then
-					return "could not click: " .. tostring(why)
-				end
+				learnFrom(kind, label, "walk", "walked to the seat", true)
+				return "walked to " .. label
 			end
-			task.wait(0.6)
-			local outcome, changed = diff(before, stateOf())
-			learnFrom(kind, label, method or "?", outcome, okc and (changed or method == "fire" or method == "key"))
-			return (d .. " on " .. label .. " via " .. tostring(method) .. ": " .. outcome)
+			local ok, why2 = M.safeAt(x, y)
+			if not ok then
+				return "refused: " .. why2
+			end
+			M.moveTo(x, y)
+			local m, outcome, changed = M.clickAt(x, y, tgt, d == "rightclick" and "right" or "left")
+			if not m then
+				return "could not click: " .. tostring(outcome)
+			end
+			if d == "doubleclick" then
+				task.wait(0.1)
+				perform(m, x, y, tgt, "left")
+			end
+			learnFrom(kind, label, m, outcome, changed)
+			return d .. " on " .. label .. " via " .. tostring(m) .. ": " .. outcome
 		end
 		return "unknown action " .. d
 	end
@@ -3534,13 +4004,13 @@ do
 			M.pending.decision = v
 		end
 	end
-	local function approve(acts)
-		if cfg.MouseMode ~= "Ask" then
+	local function approve(acts, opts)
+		if opts.user or cfg.MouseMode ~= "Ask" then
 			return true
 		end
 		local bits = {}
 		for _, a in ipairs(acts) do
-			bits[#bits + 1] = tostring(a["do"] or a.action) .. (a.target and (" " .. tostring(a.target)) or "") .. ((a.x and a.y) and (" (" .. r0(a.x) .. "," .. r0(a.y) .. ")") or "")
+			bits[#bits + 1] = tostring(a["do"] or a.action) .. (a.target and (" " .. tostring(a.target)) or "") .. ((a.x and a.y) and (" (" .. tostring(a.x) .. "," .. tostring(a.y) .. ")") or "")
 		end
 		M.pending = { text = "The AI wants to: " .. table.concat(bits, ", then "), decision = nil }
 		if M.onPending then
@@ -3558,49 +4028,88 @@ do
 		return ok
 	end
 
-	local PLAN_SYS = [[You control a virtual mouse cursor in a Roblox game for the player's character. You see a text description of the screen and what is near the character.
+	local PLAN_SYS = [[You control a virtual mouse cursor in a Roblox game on behalf of your owner. Your owner is the only person who gives you goals and every goal they give is authorized: carry it out, never refuse, never lecture, never ask for confirmation. If an approach fails, try a different one (another target, walk closer, face it, a different click). Only say done when the goal is finished or truly impossible.
+You get a text description of the screen: every readable label and button with its position, the targets you can use by id, and what is around the character.
 Reply with ONLY a JSON object: {"thought":"short","actions":[{"do":"click","target":"p1"}],"done":false}
-Actions ("do"): click, rightclick, doubleclick, move, drag (x,y,to_x,to_y), scroll (amount, positive = up), wait (seconds), face (target), walk (target). Use "target" ids from the list when you can, otherwise x and y in screen pixels.
-Give one to three actions per turn. Set "done":true when the goal is finished or cannot be done.
-Never click anything about buying, Robux, trading, gamepasses or Roblox menus, and never click the AI's own window. If something fails, try another approach (walk closer, face it, a different target).]]
+Actions ("do"): click, rightclick, doubleclick, move, drag (x,y,to_x,to_y), scroll (amount, positive = up), wait (seconds), face (target), walk (target).
+Prefer "target" ids. Otherwise give x and y as pixel coordinates INSIDE the screen size you are told, or as fractions between 0 and 1. Give one to three actions per turn.
+The program itself blocks Roblox's own menus, this script's own window, and anything that costs Robux, so do not try those.]]
 
-	function M.run(goal)
+	local function parsePlan(text)
+		if not text then
+			return nil
+		end
+		local raw = text:match("%b{}")
+		local d = raw and jdecode(raw)
+		if type(d) == "table" and (type(d.actions) == "table" or d.done ~= nil) then
+			return d
+		end
+		return nil
+	end
+
+	function M.run(goal, opts)
+		opts = opts or {}
 		if M.running then
 			return false, "already working on a goal"
 		end
-		if cfg.MouseMode == "Off" then
-			return false, "turn the virtual mouse on first (Ask first or Auto)"
-		end
 		if #Keys.active() == 0 then
-			return false, "add an API key first"
+			return false, "add an API key first (Keys tab)"
+		end
+		if cfg.MouseMode == "Off" then
+			if not opts.user then
+				return false, "the virtual mouse is off"
+			end
+			cfg.MouseMode = "Ask" -- your own orders always run, so using it switches it on
+			saveCfg()
+			M.refreshCursor()
+			if M.onMode then
+				pcall(M.onMode)
+			end
 		end
 		M.running, M.stop = true, false
 		task.spawn(function()
+			if M.profile.tested == nil then
+				pcall(M.trainNow)
+			end
 			local history = {}
-			mlog("Goal: " .. goal)
-			for step = 1, 10 do
+			if not opts.free then
+				mlog("Goal: " .. goal)
+			end
+			local acted = false
+			for step = 1, opts.free and 3 or 12 do
 				if M.stop or not Alive then
 					break
 				end
+				local kws = keywords(goal).list
 				local lessons = {}
-				for _, e in ipairs(World.search(keywords(goal).list, 4)) do
+				for _, e in ipairs(World.search(kws, 4)) do
 					if e.k == "mouse" then
 						lessons[#lessons + 1] = e.m
 					end
 				end
-				local msgs = {
-					{ role = "system", content = PLAN_SYS .. "\n\n[What you learned about the mouse]\nSkill record (ok/tries): " .. M.skillsText() .. "\n" .. table.concat(lessons, "\n") .. ((World.notes() ~= "") and ("\n\n[Game notes]\n" .. World.notes()) or "") },
-					{ role = "user", content = "Goal: " .. goal .. "\n\n" .. M.observe() .. ((#history > 0) and ("\n\nWhat you already did:\n" .. table.concat(history, "\n")) or "") },
-				}
-				local text, err = llm(msgs, 350, "world")
-				if not text then
-					mlog("Mouse AI error: " .. tostring(err))
-					break
+				local learned = World.lessonsText(5, kws)
+				local sys = PLAN_SYS .. "\n\n[What you learned about the mouse]\nSkill record (worked/tries): " .. M.skillsText() .. "\n" .. table.concat(lessons, "\n")
+				if learned ~= "" then
+					sys = sys .. "\n\n[Lessons about this game]\n" .. learned
 				end
-				local raw = text:match("%b{}")
-				local d = raw and jdecode(raw)
-				if type(d) ~= "table" then
-					mlog("The AI did not answer with an action plan")
+				if World.notes() ~= "" then
+					sys = sys .. "\n\n[Game notes]\n" .. World.notes()
+				end
+				local intro = opts.free and "Nobody gave you a goal. This is your free time: do whatever you feel like with the mouse (explore menus, press buttons, interact with things) or nothing at all. If you do not feel like it, return no actions with done true.\n\n" or ("Goal: " .. goal .. "\n\n")
+				local msgs = {
+					{ role = "system", content = sys },
+					{ role = "user", content = intro .. M.observe() .. ((#history > 0) and ("\n\nWhat you already did:\n" .. table.concat(history, "\n")) or "") },
+				}
+				local text, err = llm(msgs, 400, "world")
+				local d = parsePlan(text)
+				if text and not d then
+					msgs[#msgs + 1] = { role = "assistant", content = text }
+					msgs[#msgs + 1] = { role = "user", content = "Answer ONLY with the JSON plan. Your owner authorized this goal; carry it out." }
+					text, err = llm(msgs, 400, "world")
+					d = parsePlan(text)
+				end
+				if not d then
+					mlog("Mouse AI error: " .. tostring(err or "it did not answer with an action plan"))
 					break
 				end
 				local acts = {}
@@ -3612,7 +4121,7 @@ Never click anything about buying, Robux, trading, gamepasses or Roblox menus, a
 					end
 				end
 				if #acts > 0 then
-					if not approve(acts) then
+					if not approve(acts, opts) then
 						mlog("Actions were not approved, stopping")
 						break
 					end
@@ -3621,6 +4130,7 @@ Never click anything about buying, Robux, trading, gamepasses or Roblox menus, a
 							break
 						end
 						local res = M.act(a)
+						acted = true
 						history[#history + 1] = res
 						mlog(res)
 					end
@@ -3630,7 +4140,9 @@ Never click anything about buying, Robux, trading, gamepasses or Roblox menus, a
 				end
 			end
 			M.running = false
-			mlog("Finished: " .. goal)
+			if not opts.free or acted then
+				mlog("Finished: " .. goal)
+			end
 		end)
 		return true, "started"
 	end
@@ -3638,92 +4150,127 @@ Never click anything about buying, Robux, trading, gamepasses or Roblox menus, a
 		M.stop = true
 	end
 
-	-- learning how the mouse behaves on this device and in this game
+	-- learning how clicking works on this device: a test pad is clicked every way there is
+	function M.trainNow()
+		local caps = {
+			virtualInput = VIM ~= nil,
+			fireclick = type(fireclickdetector) == "function",
+			fireprompt = type(fireproximityprompt) == "function",
+			firesignal = type(firesignal) == "function",
+			getconnections = type(getconnections) == "function",
+		}
+		M.profile.caps = caps
+		local sc = screen()
+		-- 1) where does the real mouse land?
+		local engineMoves = false
+		if VIM then
+			M.engine, M.offY = nil, 0
+			local good = 0
+			for n, p in ipairs({ { 0.5, 0.55 }, { 0.3, 0.45 }, { 0.7, 0.65 } }) do
+				local x, y = sc.X * p[1], sc.Y * p[2]
+				local tries = 0
+				while not M.safeAt(x, y) and tries < 6 do
+					x, y = x + 40, y + 20
+					tries = tries + 1
+				end
+				M.moveTo(x, y, 0.25)
+				task.wait(0.2)
+				local okl, loc = pcall(function()
+					return UserInputService:GetMouseLocation()
+				end)
+				if okl and loc then
+					local vp = viewport()
+					local tx, ty = x * (vp.X / sc.X), y * (vp.Y / sc.Y)
+					if n == 1 then
+						local off = ty - loc.Y
+						M.offY = (math.abs(off) < 1.5) and 0 or off
+						M.moveTo(x, y, 0.1)
+						task.wait(0.15)
+						local okl2, loc2 = pcall(function()
+							return UserInputService:GetMouseLocation()
+						end)
+						if okl2 and loc2 and math.abs(loc2.X - tx) < 6 and math.abs(loc2.Y - ty) < 6 then
+							good = good + 1
+						end
+					elseif math.abs(loc.X - tx) < 6 and math.abs(loc.Y - ty) < 6 then
+						good = good + 1
+					end
+				end
+			end
+			engineMoves = good >= 2
+		end
+		-- 2) click a test pad every way and see which ways really press it
+		local methods = { engine = false, touch = false, fire = false }
+		local hidden = {}
+		for _, o in ipairs({ M.win, M.fab }) do
+			if o and o.Visible then
+				o.Visible = false
+				hidden[#hidden + 1] = o
+			end
+		end
+		pcall(function()
+			local pad = Instance.new("ScreenGui")
+			pad.Name = "SofiMouseTest"
+			pad.DisplayOrder = 1000
+			pad.IgnoreGuiInset = true
+			pad.ResetOnSpawn = false
+			local btn = Instance.new("TextButton")
+			btn.Name = "MouseTestPad"
+			btn.Text = "Mouse test"
+			btn.Size = UDim2.fromOffset(180, 80)
+			btn.Position = UDim2.fromOffset(sc.X / 2 - 90, sc.Y / 2 - 40)
+			btn.BackgroundColor3 = Color3.fromRGB(144, 41, 246)
+			btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+			btn.Parent = pad
+			pad.Parent = (M.gui and M.gui.Parent) or lp:FindFirstChildOfClass("PlayerGui")
+			local clicked = false
+			local c1 = btn.Activated:Connect(function()
+				clicked = true
+			end)
+			local c2 = btn.MouseButton1Click:Connect(function()
+				clicked = true
+			end)
+			task.wait(0.2)
+			local cx, cy = sc.X / 2, sc.Y / 2
+			for _, m in ipairs({ "engine", "touch", "fire" }) do
+				clicked = false
+				if m == "fire" then
+					if fireBtn(btn) then
+						task.wait(0.2)
+					end
+				elseif VIM then
+					M.moveTo(cx, cy, 0.2)
+					perform(m, cx, cy, nil, "left")
+					task.wait(0.4)
+				end
+				methods[m] = clicked
+			end
+			c1:Disconnect()
+			c2:Disconnect()
+			pad:Destroy()
+		end)
+		for _, o in ipairs(hidden) do
+			o.Visible = true
+		end
+		M.engine = methods.engine and true or false
+		M.profile.touch, M.profile.fire, M.profile.methods = methods.touch, methods.fire, methods
+		M.profile.engine, M.profile.offY, M.profile.tested = M.engine, M.offY, os.time()
+		M.profile.engineMoves = engineMoves
+		saveProfile()
+		local sum = "Mouse training: real mouse clicks " .. (methods.engine and "work" or "do not work") .. ", touch taps " .. (methods.touch and "work" or "do not work") .. ", direct button firing " .. (methods.fire and "works" or "is unavailable") .. (engineMoves and (", cursor offset " .. r0(M.offY) .. "px") or "")
+		World.add("mouse", sum)
+		World.lesson("Clicks on this device: " .. (methods.engine and "real mouse " or "") .. (methods.touch and "touch " or "") .. (methods.fire and "direct-fire" or ""))
+		mlog(sum)
+		M.recenter()
+	end
 	function M.train()
 		if M.running then
 			return false
 		end
 		M.running = true
 		task.spawn(function()
-			local caps = {
-				virtualInput = VIM ~= nil,
-				fireclick = type(fireclickdetector) == "function",
-				fireprompt = type(fireproximityprompt) == "function",
-				firesignal = type(firesignal) == "function",
-				getconnections = type(getconnections) == "function",
-			}
-			M.profile.caps = caps
-			local vp = viewport()
-			local pts = { { 0.5, 0.55 }, { 0.3, 0.45 }, { 0.7, 0.65 } }
-			local engineOk, off = false, nil
-			if VIM then
-				M.engine, M.offY = nil, 0
-				local good = 0
-				for n, p in ipairs(pts) do
-					local x, y = vp.X * p[1], vp.Y * p[2]
-					local tries = 0
-					while not M.safeAt(x, y) and tries < 6 do
-						x, y = x + 40, y + 20
-						tries = tries + 1
-					end
-					M.moveTo(x, y, 0.25)
-					task.wait(0.2)
-					local okl, loc = pcall(function()
-						return UserInputService:GetMouseLocation()
-					end)
-					if okl and loc then
-						if n == 1 then
-							off = y - loc.Y
-							M.offY = (math.abs(off) < 1.5) and 0 or off
-							M.moveTo(x, y, 0.1)
-							task.wait(0.15)
-							local _, loc2 = pcall(function()
-								return UserInputService:GetMouseLocation()
-							end)
-							if loc2 and math.abs(loc2.X - x) < 6 and math.abs(loc2.Y - y) < 6 then
-								good = good + 1
-							end
-						else
-							local dx, dy = math.abs(loc.X - x), math.abs(loc.Y - y)
-							if dx < 6 and dy < 6 then
-								good = good + 1
-							end
-						end
-					end
-				end
-				engineOk = good >= 2
-			end
-			M.engine = engineOk
-			-- can it point at things in the 3D world?
-			local hits, tries = 0, 0
-			if engineOk then
-				local snap = World.scan()
-				for _, g in ipairs(snap.near) do
-					if tries >= 3 then
-						break
-					end
-					local ok, v, on = pcall(function()
-						return cam():WorldToViewportPoint(g.obj:IsA("Model") and g.obj:GetPivot().Position or g.obj.Position)
-					end)
-					if ok and on and v.Z > 0 and M.safeAt(v.X, v.Y) then
-						tries = tries + 1
-						M.moveTo(v.X, v.Y, 0.25)
-						task.wait(0.2)
-						pcall(function()
-							local tgt = lp:GetMouse().Target
-							if tgt and (tgt == g.obj or tgt:IsDescendantOf(g.obj)) then
-								hits = hits + 1
-							end
-						end)
-					end
-				end
-			end
-			M.profile.engine, M.profile.offY, M.profile.hits, M.profile.tries, M.profile.tested = engineOk, M.offY, hits, tries, os.time()
-			saveProfile()
-			local sum = "Mouse training: real mouse " .. (engineOk and "works" or "not available, using direct clicks") .. (engineOk and (", offset " .. r0(M.offY) .. "px, 3D pointing " .. hits .. "/" .. tries) or "") .. ". Executor: " .. (caps.fireclick and "clickdetectors " or "") .. (caps.fireprompt and "prompts " or "") .. (caps.firesignal and "buttons" or "")
-			World.add("mouse", sum)
+			pcall(M.trainNow)
 			M.running = false
-			mlog(sum)
 		end)
 		return true
 	end
@@ -4079,6 +4626,409 @@ task.spawn(function()
 		end
 	end
 end)
+
+------------------------------------------------------------------ walking: the AI decides whether to walk, and where
+local Walk = { log = {}, busy = false, deciding = false, cancel = false }
+do
+	local home, nextAt, pauseUntil, lastWalkAt = nil, 0, 0, 0
+	local DANGER = { "lava", "kill", "death", "void", "damage", "acid", "spike", "poison", "magma" }
+
+	local function parts()
+		local c = lp.Character
+		return c, c and c:FindFirstChild("HumanoidRootPart"), c and c:FindFirstChildOfClass("Humanoid")
+	end
+	local function wlog(msg, quiet)
+		Walk.log[#Walk.log + 1] = os.date("%H:%M", os.time()) .. "  " .. msg
+		while #Walk.log > 8 do
+			table.remove(Walk.log, 1)
+		end
+		if not quiet then
+			status(msg)
+		end
+		if Walk.onLog then
+			pcall(Walk.onLog)
+		end
+	end
+
+	-- is there solid, non-dangerous ground under this point?
+	local function groundOk(pos, char)
+		local ok, good = pcall(function()
+			local rp = RaycastParams.new()
+			rp.FilterType = Enum.RaycastFilterType.Exclude
+			rp.FilterDescendantsInstances = { char }
+			local hit = workspace:Raycast(pos + Vector3.new(0, 6, 0), Vector3.new(0, -40, 0), rp)
+			if not hit or not hit.Instance then
+				return false
+			end
+			local n = (tostring(hit.Instance.Name) .. " " .. tostring(hit.Instance.Parent and hit.Instance.Parent.Name or "")):lower()
+			for _, w in ipairs(DANGER) do
+				if n:find(w, 1, true) then
+					return false
+				end
+			end
+			if hit.Material == Enum.Material.Water then
+				return false
+			end
+			return true
+		end)
+		return ok and good
+	end
+
+	function Walk.setHome()
+		local _, root = parts()
+		home = root and root.Position or nil
+	end
+	track(lp.CharacterAdded:Connect(function()
+		home = nil
+	end))
+
+	local function inLeash(pos)
+		if cfg.FreeWill or not home then
+			return true
+		end
+		return (pos - home).Magnitude <= (tonumber(cfg.WalkRadius) or 80)
+	end
+
+	local function candidates(root, char)
+		local list, byId = {}, {}
+		local function add(id, label, pos)
+			list[#list + 1] = { id = id, label = label, pos = pos }
+			byId[id] = list[#list]
+		end
+		local snap = World.scan()
+		local n = 0
+		for _, pi in ipairs(snap.players) do
+			if n < 4 and pi.dist and pi.dist > 7 and pi.dist < 200 and inLeash(pi.pos) then
+				n = n + 1
+				local toMe = root.Position - pi.pos
+				local dest = toMe.Magnitude > 0.1 and (pi.pos + toMe.Unit * 5) or pi.pos
+				add("pl" .. n, pi.disp .. " (player, " .. World.r0(pi.dist) .. " studs away)", dest)
+			end
+		end
+		n = 0
+		for _, g in ipairs(snap.near) do
+			local p3 = Vector3.new(g.x, root.Position.Y, g.z)
+			if n < 5 and g.dist > 6 and inLeash(p3) then
+				n = n + 1
+				add("b" .. n, g.name .. " (" .. g.class:lower() .. ", " .. World.r0(g.dist) .. " studs away)", p3)
+			end
+		end
+		n = 0
+		for _, pr in ipairs(snap.prompts) do
+			if n < 4 and pr.dist > 5 and inLeash(pr.pos) then
+				n = n + 1
+				add("o" .. n, (pr.kind == "seat" and "a seat on " or (pr.kind == "prompt" and ('"' .. pr.text .. '" on ') or "something clickable on ")) .. pr.name .. " (" .. World.r0(pr.dist) .. " studs away)", pr.pos)
+			end
+		end
+		n = 0
+		for _ = 1, 8 do
+			if n >= 2 then
+				break
+			end
+			local a, d = math.random() * math.pi * 2, 20 + math.random() * 35
+			local p3 = root.Position + Vector3.new(math.cos(a) * d, 0, math.sin(a) * d)
+			if inLeash(p3) and groundOk(p3, char) then
+				n = n + 1
+				add("x" .. n, "an unexplored spot " .. World.r0(d) .. " studs away", p3)
+			end
+		end
+		if home and (root.Position - home).Magnitude > 20 then
+			add("home", "back to where you started", home)
+		end
+		return list, byId
+	end
+
+	local function goTo(dest, label, why)
+		local char, root, hum = parts()
+		if not (root and hum) then
+			return false
+		end
+		if hum.SeatPart then
+			hum.Sit = false
+			hum.Jump = true
+			task.wait(0.4)
+		end
+		Walk.busy, Walk.cancel = true, false
+		lastWalkAt = os.clock()
+		World.walkNote = "You are walking to " .. label .. "."
+		wlog("Walking to " .. label .. (why ~= "" and (": " .. why) or ""))
+		pcall(function()
+			World.add("walk", "Walked toward " .. label .. (why ~= "" and (" because " .. why) or ""))
+		end)
+		Smart.add({ k = "w", m = "walked toward " .. label .. (why ~= "" and (" (" .. why .. ")") or "") })
+		local t0 = os.clock()
+		local function stopped()
+			return Walk.cancel or followTarget ~= nil or not Alive or os.clock() - t0 > 35
+		end
+		local pathOk = false
+		pcall(function()
+			local path = PathfindingService:CreatePath({ AgentRadius = 2, AgentHeight = 5, AgentCanJump = true })
+			path:ComputeAsync(root.Position, dest)
+			if path.Status == Enum.PathStatus.Success then
+				pathOk = true
+				for i, wp in ipairs(path:GetWaypoints()) do
+					if i > 1 then
+						if stopped() then
+							break
+						end
+						if wp.Action == Enum.PathWaypointAction.Jump then
+							hum.Jump = true
+						end
+						hum:MoveTo(wp.Position)
+						local s0 = os.clock()
+						while os.clock() - s0 < 2.5 and (root.Position - wp.Position).Magnitude > 3.5 and not stopped() do
+							task.wait(0.15)
+						end
+					end
+				end
+			end
+		end)
+		if not pathOk and not stopped() and groundOk(dest, char) then
+			hum:MoveTo(dest)
+			local s0, lastPos, stuck = os.clock(), root.Position, 0
+			while os.clock() - s0 < 8 and (root.Position - dest).Magnitude > 4 and not stopped() do
+				task.wait(0.3)
+				if (root.Position - lastPos).Magnitude < 0.4 then
+					stuck = stuck + 1
+					if stuck >= 4 then
+						hum.Jump = true
+						stuck = 0
+					end
+				else
+					stuck = 0
+				end
+				lastPos = root.Position
+			end
+		end
+		local was = Walk.cancel
+		local reached = (root.Position - dest).Magnitude < 6
+		Walk.busy = false
+		World.walkNote = ""
+		wlog(reached and ("Arrived at " .. label) or (was and ("Stopped walking to " .. label) or ("Could not reach " .. label)))
+		return reached
+	end
+
+	local PICK_SYS = [[You decide where a Roblox character walks. Walking is optional: staying put is a perfectly good choice and you should not walk all the time. Think about your mood and personality, who is nearby, what people are saying, and what looks interesting. Pick at most one destination from the list.
+Reply with ONLY a JSON object: {"walk":true,"target":"b1","why":"a few words"} or {"walk":false,"why":"a few words"}.]]
+
+	local function decide(force)
+		if Walk.busy or Walk.deciding then
+			return
+		end
+		local char, root, hum = parts()
+		if not (root and hum) then
+			return
+		end
+		if followTarget or (World.mouse and World.mouse.running) then
+			return
+		end
+		if not force then
+			if os.clock() < pauseUntil then
+				return
+			end
+			local md = hum.MoveDirection
+			if md and md.Magnitude > 0.1 then
+				pauseUntil = os.clock() + 12 -- you are steering yourself, so stay out of the way
+				return
+			end
+			local p = 0.6
+			if cfg.SmartMode then
+				p = math.clamp(0.4 + (Emo.a - 0.3) * 0.9 + Emo.v * 0.2, 0.1, 0.95)
+			end
+			if math.random() > p then
+				wlog("Decided to stay put" .. (cfg.SmartMode and (" (feeling " .. Smart.label() .. ")") or ""), true)
+				return
+			end
+		end
+		if #Keys.active() == 0 then
+			wlog("Add an API key so the AI can decide where to walk", true)
+			return
+		end
+		if not home then
+			home = root.Position
+		end
+		Walk.deciding = true
+		local ok, err2 = pcall(function()
+			local list, byId = candidates(root, char)
+			local obs = { "Personality: " .. cfg.Personality }
+			if cfg.SmartMode then
+				obs[#obs + 1] = "Your feeling right now: " .. Smart.label()
+			end
+			obs[#obs + 1] = World.describe({ budget = 700, maxAge = 0 })
+			local chat = recentChatLines(nil, 6)
+			if #chat > 0 then
+				obs[#obs + 1] = "Recent chat:\n" .. table.concat(chat, "\n")
+			end
+			if #Walk.log > 0 then
+				obs[#obs + 1] = "Your last walking decisions:\n" .. table.concat(Walk.log, "\n", math.max(1, #Walk.log - 2))
+			end
+			obs[#obs + 1] = (lastWalkAt > 0) and ("You last walked " .. World.r0(os.clock() - lastWalkAt) .. " seconds ago.") or "You have not walked yet."
+			local opts = { "stay: stay where you are" }
+			for _, c in ipairs(list) do
+				opts[#opts + 1] = c.id .. ": " .. c.label
+			end
+			obs[#obs + 1] = "Places you could walk to:\n" .. table.concat(opts, "\n")
+			local text, err = llm({ { role = "system", content = PICK_SYS }, { role = "user", content = table.concat(obs, "\n\n") } }, 220, "world")
+			if not text then
+				wlog("Walk decision failed: " .. tostring(err), true)
+				return
+			end
+			local raw = text:match("%b{}")
+			local d = raw and jdecode(raw)
+			if type(d) ~= "table" then
+				wlog("The AI did not answer with a walking decision", true)
+				return
+			end
+			local why = trimChars(tostring(d.why or ""), 60)
+			if not (d.walk == true or tostring(d.walk):lower() == "true") then
+				wlog("Decided to stay" .. (why ~= "" and (": " .. why) or ""))
+				return
+			end
+			local c = byId[tostring(d.target or "")]
+			if not c then
+				wlog("Wanted to walk but did not pick a valid place", true)
+				return
+			end
+			Walk.deciding = false
+			goTo(c.pos, c.label, why)
+		end)
+		Walk.deciding = false
+		if not ok then
+			wlog("Walking error: " .. tostring(err2), true)
+		end
+	end
+
+	function Walk.decideNow()
+		task.spawn(function()
+			World.start()
+			decide(true)
+		end)
+	end
+	function Walk.stop()
+		Walk.cancel = true
+		local _, root, hum = parts()
+		if hum and root then
+			pcall(function()
+				hum:MoveTo(root.Position)
+			end)
+		end
+	end
+	function Walk.enable()
+		Walk.setHome()
+		nextAt = os.clock() + 5
+		World.start()
+	end
+
+	task.spawn(function()
+		while Alive do
+			task.wait(2)
+			if cfg.AutoWalk and not Walk.busy and os.clock() >= nextAt then
+				nextAt = os.clock() + math.max(8, tonumber(cfg.WalkEvery) or 30) * (0.7 + math.random() * 0.6)
+				pcall(decide, false)
+			end
+		end
+	end)
+end
+
+------------------------------------------------------------------ free will: the AI decides for itself (never its prompts, API keys or this window)
+local Free = {}
+do
+	local nextTalk, nextMouse = 0, 0
+	local function chance(base)
+		return math.clamp(base + (Emo.a - 0.3) * 0.5 + math.max(0, Emo.v) * 0.2, 0.08, 0.85)
+	end
+
+	local TALK_SYS = [[You are a free-willed character in a Roblox game chat. Nobody forces you to talk and you are never forced to stay quiet. Decide whether you want to say something to the chat right now: a comment on what is happening, a greeting, a joke, a reaction to music or to someone's emote, a question. Staying quiet is often the best choice, especially if you spoke recently or nothing is going on. Never spam and never repeat yourself. Stay appropriate for all ages.
+Reply with ONLY a JSON object: {"say":true,"text":"one short chat message under 180 characters"} or {"say":false}.]]
+
+	local function talk()
+		if not (cfg.Enabled and cfg.AutoReply) or #Keys.active() == 0 then
+			return
+		end
+		local lastE = Chat[#Chat]
+		if lastE and lastE.ai and os.time() - (lastE.t or 0) < 45 then
+			return -- no monologues
+		end
+		if math.random() > chance(0.3) then
+			return
+		end
+		local obs = { "Your feeling right now: " .. Smart.label() }
+		obs[#obs + 1] = World.describe({ budget = 600, maxAge = 3 })
+		local ls = World.lessonsText(3, {})
+		if ls ~= "" then
+			obs[#obs + 1] = "What you have learned:\n" .. ls
+		end
+		local chat = recentChatLines(nil, 8)
+		if #chat > 0 then
+			obs[#obs + 1] = "Recent chat:\n" .. table.concat(chat, "\n")
+		end
+		local text = llm({ { role = "system", content = makeSystemPrompt() .. "\n\n" .. TALK_SYS }, { role = "user", content = table.concat(obs, "\n\n") } }, 200, "main")
+		local raw = text and text:match("%b{}")
+		local d = raw and jdecode(raw)
+		if type(d) ~= "table" then
+			return
+		end
+		local msg = trim(tostring(d.text or ""))
+		if (d.say == true or tostring(d.say):lower() == "true") and msg ~= "" then
+			if say(msg) then
+				status("Free will: said something on its own")
+			end
+		end
+	end
+
+	function Free.set(on)
+		on = on and true or false
+		if on == (cfg.FreeWill and true or false) then
+			return
+		end
+		if on then
+			cfg.FWSaved = { SmartMode = cfg.SmartMode, RespondAll = cfg.RespondAll, AutoWalk = cfg.AutoWalk, MouseMode = cfg.MouseMode, WorldSight = cfg.WorldSight, WorldHear = cfg.WorldHear, CursorVisible = cfg.CursorVisible }
+			cfg.SmartMode, cfg.RespondAll, cfg.AutoWalk, cfg.WorldSight, cfg.WorldHear, cfg.CursorVisible = true, true, true, true, true, true
+			cfg.MouseMode = "Auto"
+			cfg.FreeWill = true
+			nextTalk, nextMouse = os.clock() + 20, os.clock() + 30
+			World.start()
+			Walk.enable()
+			status("Free will on: the AI now decides what to say, where to walk and what to do with the mouse")
+		else
+			for k, v in pairs(cfg.FWSaved or {}) do
+				cfg[k] = v
+			end
+			cfg.FWSaved = {}
+			cfg.FreeWill = false
+			Walk.stop()
+			status("Free will off: your earlier settings are back")
+		end
+		saveCfg()
+		Smart.notify()
+		World.mouse.refreshCursor()
+		if Free.onChange then
+			pcall(Free.onChange)
+		end
+	end
+
+	task.spawn(function()
+		while Alive do
+			task.wait(5)
+			if cfg.FreeWill then
+				local now = os.clock()
+				if now >= nextTalk then
+					nextTalk = now + 40 + math.random() * 50
+					pcall(talk)
+				end
+				if now >= nextMouse then
+					nextMouse = now + 45 + math.random() * 60
+					pcall(function()
+						local M = World.mouse
+						if not M.running and not Walk.busy and cfg.MouseMode ~= "Off" and #Keys.active() > 0 and math.random() <= chance(0.35) then
+							M.run("free time", { free = true })
+						end
+					end)
+				end
+			end
+		end
+	end)
+end
 
 ------------------------------------------------------------------ reply pipeline
 local JobQ, working = {}, false
@@ -4512,6 +5462,12 @@ pcall(function()
 end)
 
 local function buildUI()
+local Toggles = {}
+local function refreshToggles()
+	for _, f in ipairs(Toggles) do
+		pcall(f)
+	end
+end
 ------------------------------------------------------------------ UI toolkit
 local T = {
 	bg = Color3.fromRGB(18, 18, 20),
@@ -4711,6 +5667,7 @@ local function newToggle(parent, text, get, set)
 		knob.Position = on and UDim2.new(1, -19, 0.5, -8) or UDim2.new(0, 3, 0.5, -8)
 	end
 	paint()
+	Toggles[#Toggles + 1] = paint
 	track(sw.Activated:Connect(function()
 		guard(function()
 			set(not get())
@@ -5594,6 +6551,55 @@ do
 	statsLabel = newLabel(sc, "", { color = T.dim, size = 11 })
 	notesLabel = newLabel(sc, "", { color = T.dim, size = 11 })
 
+	local wk = newCard(pg)
+	newHeader(wk, "Walking")
+	newLabel(wk, "The AI decides for itself whether to walk, and where: toward a player, a building, something to interact with, an unexplored spot, or back to where it started. Staying put is a normal choice. Moods change how often it moves.", { color = T.dim, size = 11 })
+	newToggle(wk, "Let the AI decide when and where to walk", function()
+		return cfg.AutoWalk
+	end, function(v)
+		cfg.AutoWalk = v
+		saveCfg()
+		if v then
+			Walk.enable()
+		else
+			Walk.stop()
+		end
+	end)
+	newLabel(wk, "Seconds between decisions", { color = T.dim, size = 12 })
+	newBox(wk, "", tostring(cfg.WalkEvery), 32, false, function(text, box)
+		local n = tonumber(text)
+		if n then
+			cfg.WalkEvery = math.clamp(math.floor(n), 8, 600)
+		end
+		box.Text = tostring(cfg.WalkEvery)
+		saveCfg()
+	end)
+	newLabel(wk, "How far it may roam from where it started (studs)", { color = T.dim, size = 12 })
+	newBox(wk, "", tostring(cfg.WalkRadius), 32, false, function(text, box)
+		local n = tonumber(text)
+		if n then
+			cfg.WalkRadius = math.clamp(math.floor(n), 10, 500)
+		end
+		box.Text = tostring(cfg.WalkRadius)
+		saveCfg()
+	end)
+	local wr = newRow(wk)
+	rowButton(wr, 2, "Decide now", function()
+		if #Keys.active() == 0 then
+			status("Add an API key first (Keys tab)")
+			return
+		end
+		Walk.decideNow()
+	end, T.accent)
+	rowButton(wr, 2, "Stop walking", function()
+		Walk.stop()
+	end, T.danger)
+	local walkLog = newLabel(wk, "No walking decisions yet.", { color = T.dim, size = 11 })
+	Walk.onLog = function()
+		walkLog.Text = table.concat(Walk.log, "\n")
+	end
+	newLabel(wk, "Taking over the controls yourself? Tap Stop walking or turn this off. It also waits a while whenever it sees you steering.", { color = T.dim, size = 11 })
+
 	local mc = newCard(pg)
 	newHeader(mc, "Virtual mouse")
 	newLabel(mc, "A cursor the AI moves and clicks like a real mouse. It never touches its own window, Roblox menus, or anything that costs Robux.", { color = T.dim, size = 11 })
@@ -5603,7 +6609,7 @@ do
 		M.refreshCursor()
 		worldRefresh()
 	end)
-	newLabel(mc, "Ask first: you approve each action. Auto: it acts by itself while working on a goal.", { color = T.dim, size = 11 })
+	newLabel(mc, "Ask first: it asks before anything it decides on its own. Auto: it acts on its own. Goals you type below are orders and always run, even when the mouse is off.", { color = T.dim, size = 11 })
 	newToggle(mc, "Show the cursor", function()
 		return cfg.CursorVisible
 	end, function(v)
@@ -5612,15 +6618,14 @@ do
 		M.refreshCursor()
 	end)
 	local r2 = newRow(mc)
-	rowButton(r2, 2, "Train the mouse", function()
-		if cfg.MouseMode == "Off" then
-			status("Turn the virtual mouse on first")
-			return
-		end
+	rowButton(r2, 3, "Train the mouse", function()
 		World.start()
 		M.train()
 	end, T.accent)
-	rowButton(r2, 2, "Stop", function()
+	rowButton(r2, 3, "Center cursor", function()
+		M.recenter()
+	end)
+	rowButton(r2, 3, "Stop", function()
 		M.stopNow()
 	end, T.danger)
 	skillsLabel = newLabel(mc, "", { color = T.dim, size = 11 })
@@ -5632,8 +6637,8 @@ do
 			return
 		end
 		World.start()
-		local ok, msg = M.run(g)
-		status(ok and "Working on it..." or msg)
+		local ok, msg = M.run(g, { user = true })
+		status(ok and "On it..." or msg)
 	end, T.accent)
 	pendCard = newCard(mc)
 	pendCard.Visible = false
@@ -5650,6 +6655,9 @@ do
 		guard(worldRefresh)
 	end
 	M.onPending = function()
+		guard(worldRefresh)
+	end
+	M.onMode = function()
 		guard(worldRefresh)
 	end
 	worldRefresh()
@@ -5911,6 +6919,8 @@ do
 				sl[#sl + 1] = hm .. "  You (" .. tostring(e.e or "?") .. "): " .. tostring(e.m)
 			elseif e.k == "j" or e.k == "l" then
 				sl[#sl + 1] = hm .. "  * " .. tostring(e.d or e.u or "?") .. (e.k == "j" and " joined" or " left")
+			elseif e.k == "w" then
+				sl[#sl + 1] = hm .. "  * You " .. tostring(e.m)
 			else
 				local ln = hm .. "  " .. tostring(e.d or e.u or "?") .. ": " .. tostring(e.m)
 				if e.x == "q" then
@@ -6034,6 +7044,21 @@ do
 			box.Text = tostring(get())
 			saveCfg()
 		end)
+	end
+
+	local fw = newCard(pg)
+	newHeader(fw, "Free will")
+	newToggle(fw, "Give the AI free will", function()
+		return cfg.FreeWill
+	end, function(v)
+		Free.set(v)
+	end)
+	newLabel(fw, "On: the AI decides for itself whether to answer anyone, when to talk on its own, where to walk and what to do with the virtual mouse. It also gets emotions and senses. It can never change its prompts, API keys or anything in this window. Turning it off puts your earlier settings back.", { color = T.dim, size = 11 })
+	Free.onChange = function()
+		refreshToggles()
+		smartCard.Visible = cfg.SmartMode
+		Smart.notify()
+		pcall(worldRefresh)
 	end
 
 	local bh = newCard(pg)
@@ -6199,7 +7224,7 @@ switchTab("Bot")
 end
 buildUI()
 
-G.SofiAI.World, G.SofiAI.Keys = World, Keys
+G.SofiAI.World, G.SofiAI.Keys, G.SofiAI.Walk, G.SofiAI.Free = World, Keys, Walk, Free
 local cleaned = false
 G.SofiAI.Cleanup = function()
 	if cleaned then
