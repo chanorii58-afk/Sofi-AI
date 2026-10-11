@@ -1,15 +1,18 @@
 --[[
-	SOFI AI v2  -  Roblox chat AI for executors (built for Delta / mobile)
+	SOFI AI v3.2  -  Roblox AI that chats and plays (built for Delta / mobile)
 
-	* Replies ONLY when someone says your name: warmachine12908 or Sofi
-	* Free API keys: Groq (default), Google Gemini, OpenRouter
-	* Knowledge tab (brain icon): saved sources/links + trigger questions
-	* Triggers tab: fixed messages sent when a player says a word you pick
-	* Memory tab (ChatGPT icon): chat memory (1000) + trigger memory (500)
-	* Smart mode (Settings): emotions, decides when to reply, smart memory (2000)
-	* Settings: respond to everyone, group chat with one shared topic
+	* Chats when someone says your name: warmachine12908 or Sofi (or everyone, in Settings)
+	* Free API keys: Groq, Gemini, OpenRouter, Cerebras, NVIDIA, HuggingFace (Keys tab, up to 4)
+	* Knowledge, Triggers, Memory, Coding and Ask AI tabs
+	* Smart mode: emotions, relationships, decides when to reply
+	* World tab: sees players (where they are, what they hold), hears audio, remembers each game
+	* Virtual mouse: a visible cursor (turns black while pressing or dragging) that clicks game
+	  buttons and Roblox's own menus
+	* Playing like a person (World tab): curious about things it does not understand, plays on its
+	  own with goals, chats like a streamer, jumps over blocks, walks around walls, dodges
+	* Settings: range ring (purple) shows where it listens, free will switch
 	* Everything saves to your executor's workspace folder "SofiAI"
-	  so it survives leaving / rejoining.
+	  so it survives leaving / rejoining / updating.
 
 	Quick start: run the script, open the "Bot" tab, paste a FREE key
 	(Groq: console.groq.com/keys) and tap "Test connection".
@@ -19,7 +22,7 @@
 local PRESET_KEYS = { "", "", "", "" } -- optional: paste up to 4 API keys here (you can also use the Keys tab)
 local CAP_CHAT, CAP_TRIGGER, CAP_SMART, CAP_ASK, CAP_WORLD = 6000, 5500, 7000, 2000, 99999999
 local DIR = "SofiAI"
-local VERSION = "3.1"
+local VERSION = "3.2"
 
 local Players = game:GetService("Players")
 local HttpService = game:GetService("HttpService")
@@ -60,7 +63,7 @@ local function baseCleanup()
 		end)
 	end
 end
-G.SofiAI = { Cleanup = baseCleanup, Version = "3.1" }
+G.SofiAI = { Cleanup = baseCleanup, Version = "3.2" }
 
 ------------------------------------------------------------------ executor helpers
 local httprequest = (syn and syn.request) or (http and http.request) or http_request or (fluxus and fluxus.request) or request
@@ -361,6 +364,7 @@ local ICON_DATA = {
 	code = "iVBORw0KGgoAAAANSUhEUgAAAGAAAABgCAYAAADimHc4AAAABmJLR0QA/wD/AP+gvaeTAAAB4klEQVR4nO3cTU7rQBBF4YjFZAEwCJv20ogSNnCZuEQLE7tbcv9U9fkkxu53D3KeiOXLBQAAAAAAAAAAAACAE0m6Slokfa8/i6TrLNfvStJN0kNb9xYjrOPf/7n+Q9Kt9vW72hnfLA3OsOxcP26EjPEl6dngHM+DM8SLkDn+KAFiRSgYX+p/C4oVoXD83h/CsSJI+hj1HyrpXdJXwdk+W53tFCOPn5wxZgQP4ydnjRXB0/jJmWNE8Di+cR/B8/jGbYQI4xt3ESKNb9xEiDi+GT5C5PHNsBFmGN8MF2Gm8c0wEWYc33SPMPP4plsExv/VPALjbzWLwPivVY/A+MeqRdAsX9mdQDW+ctVMX1qfoDDC8UMHmu2xjRMURNg8dvPW48DYIW5BRQp++6XMWxAfwpkKx89/7km9//bhgGr/V50Ir1UfP7kQEf5oNn5yQSKsmo+fXHj6CN3GTw4wbYTu4ycHmS7CMOMnB5omwnDjJwcLH2HY8ZMDho0w/PjJQcNFcDN+cuAwEdyNbyJEcDu+8RzB/fjGY4Qw4xtPEcKNbzxECDu+GTlC+PGNeFVBf4UReFlHDQUReF1NLZkRRggQb3yTEaH3LSju+GYnQu8P4fjjG/HaSgAAAAAAAAAAAADABH4ATjUT6b9jTY4AAAAASUVORK5CYII=",
 	sparkles = "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",
 	pointer = "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",
+	pointer2 = "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",
 	settings = "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",
 }
 
@@ -740,6 +744,11 @@ local Default = {
 	WalkRadius = 80,
 	FreeWill = false,
 	FWSaved = {},
+	Curious = false,
+	AutoPlay = false,
+	PlayEvery = 6,
+	Reflex = true,
+	ShowRange = true,
 }
 for i = 1, 4 do
 	Default.Slots[i] = { key = "", provider = "", model = "", models = {}, modelsAt = 0, on = true }
@@ -1610,6 +1619,9 @@ do
 		if Emo.tag and EMO[Emo.tag] and os.time() - (Emo.tagT or 0) <= 120 then
 			return Emo.tag
 		end
+		if World.curious and World.curious.level and World.curious.level > 0.6 and Emo.v > -0.3 then
+			return "curious"
+		end
 		local v, a = Emo.v, Emo.a
 		if v >= 0.55 then
 			return a >= 0.55 and "excited" or "happy"
@@ -2027,7 +2039,7 @@ Use "respond":false and "reply":"" when you stay quiet. "emotion" is how you fee
 end
 
 ------------------------------------------------------------------ world: sight, hearing, world memory (virtual mouse is further below)
-do
+;(function() -- own function scope: Lua allows only 200 locals per function
 	local function svc(n)
 		local ok, s2 = pcall(game.GetService, game, n)
 		return ok and s2 or nil
@@ -2043,6 +2055,12 @@ do
 		return ok and tonumber(v) or 0
 	end
 	World.insetY = insetY
+	function World.guiPoint(vx, vy)
+		local c = cam()
+		local vp = c and c.ViewportSize or Vector2.new(800, 400)
+		local sc = World.screenSize and World.screenSize() or vp
+		return vx * (sc.X / vp.X), vy * (sc.Y / vp.Y)
+	end
 	local function r0(x)
 		return string.format("%d", math.floor((tonumber(x) or 0) + 0.5))
 	end
@@ -2244,7 +2262,31 @@ do
 		return so
 	end
 
-	local function playerInfo(p, myPos)
+	local function bearingWord(look, from, to)
+		if not look or look.Magnitude < 0.05 then
+			return nil
+		end
+		local d = Vector3.new(to.X - from.X, 0, to.Z - from.Z)
+		if d.Magnitude < 1.5 then
+			return "right next to you"
+		end
+		local l, u = look.Unit, d.Unit
+		local ang = math.deg(math.atan2(l.X * u.Z - l.Z * u.X, l.X * u.X + l.Z * u.Z))
+		local a = math.abs(ang)
+		local side = ang >= 0 and "right" or "left"
+		if a < 25 then
+			return "ahead"
+		elseif a < 70 then
+			return "ahead " .. side
+		elseif a < 110 then
+			return side
+		elseif a < 155 then
+			return "behind " .. side
+		end
+		return "behind you"
+	end
+
+	local function playerInfo(p, myPos, myLook)
 		local char = p.Character
 		local root = char and char:FindFirstChild("HumanoidRootPart")
 		local hum = char and char:FindFirstChildOfClass("Humanoid")
@@ -2257,6 +2299,37 @@ do
 		end
 		pcall(function()
 			info.state = hum:GetState().Name
+		end)
+		if myPos then
+			info.bearing = bearingWord(myLook, myPos, root.Position)
+			pcall(function()
+				local rp = RaycastParams.new()
+				rp.FilterType = Enum.RaycastFilterType.Exclude
+				rp.FilterDescendantsInstances = { lp.Character }
+				local origin = myPos + Vector3.new(0, 1.5, 0)
+				local hit = workspace:Raycast(origin, (root.Position + Vector3.new(0, 1, 0)) - origin, rp)
+				if hit and hit.Instance and not hit.Instance:IsDescendantOf(char) then
+					info.blocked = tostring(hit.Instance.Name)
+				end
+			end)
+			pcall(function()
+				local v = root.AssemblyLinearVelocity
+				if v then
+					info.speed = v.Magnitude
+					local toMe = myPos - root.Position
+					if v.Magnitude > 3 and toMe.Magnitude > 0.1 and v:Dot(toMe.Unit) > v.Magnitude * 0.5 then
+						info.toward = true
+					end
+				end
+			end)
+		end
+		pcall(function()
+			local ok, v, on = pcall(function()
+				return cam():WorldToViewportPoint(root.Position)
+			end)
+			if ok and on and v.Z > 0 and World.guiPoint then
+				info.sx, info.sy = World.guiPoint(v.X, v.Y)
+			end
 		end)
 		local tool = char:FindFirstChildOfClass("Tool")
 		if tool then
@@ -2327,7 +2400,7 @@ do
 				pcall(function()
 					snap.me.state = hum:GetState().Name
 				end)
-				snap.me.hp = hum.Health
+				snap.me.hp, snap.me.maxhp = hum.Health, hum.MaxHealth
 				if hum.SeatPart then
 					snap.me.sit = hum.SeatPart.Name
 				end
@@ -2338,9 +2411,17 @@ do
 			end
 		end)
 		pcall(function()
+			local myLook
+			pcall(function()
+				local cf = root and root.CFrame
+				if cf and cf.LookVector then
+					myLook = Vector3.new(cf.LookVector.X, 0, cf.LookVector.Z)
+				end
+			end)
+			snap.me.look = myLook
 			for _, p in ipairs(Players:GetPlayers()) do
 				if p ~= lp then
-					local pi = playerInfo(p, myPos)
+					local pi = playerInfo(p, myPos, myLook)
 					if pi then
 						snap.players[#snap.players + 1] = pi
 					end
@@ -2472,9 +2553,18 @@ do
 		if pi.soundRaw then
 			bits[#bits + 1] = 'playing audio "' .. (World.nameOf(pi.soundRaw) or ("audio id " .. tostring(assetId(pi.soundRaw) or "?"))) .. '"'
 		end
+		if pi.toward then
+			bits[#bits + 1] = "coming toward you"
+		end
+		if pi.blocked then
+			bits[#bits + 1] = "behind " .. pi.blocked .. " (no direct view)"
+		end
+		if withDist and pi.sx then
+			bits[#bits + 1] = "on screen at (" .. r0(pi.sx) .. "," .. r0(pi.sy) .. ")"
+		end
 		local head = pi.disp
 		if withDist and pi.dist then
-			head = head .. " (" .. r0(pi.dist) .. " studs" .. (pi.state and (", " .. pi.state:lower()) or "") .. ")"
+			head = head .. " (" .. r0(pi.dist) .. " studs" .. (pi.bearing and (", " .. pi.bearing) or "") .. (pi.state and (", " .. pi.state:lower()) or "") .. ")"
 		end
 		return head .. ": " .. (#bits > 0 and table.concat(bits, "; ") or "nothing special")
 	end
@@ -2508,6 +2598,10 @@ do
 		end
 		if World.walkNote and World.walkNote ~= "" then
 			L[#L + 1] = World.walkNote
+		end
+		local obst = World.obstacles and World.obstacles() or ""
+		if obst ~= "" then
+			L[#L + 1] = obst
 		end
 		if cfg.WorldSight then
 			if #snap.players > 0 then
@@ -2862,7 +2956,16 @@ do
 			end
 		end)
 		table.sort(out, function(a, b)
-			return a.area > b.area
+			if a.area ~= b.area then
+				return a.area > b.area
+			end
+			if a.y ~= b.y then
+				return a.y < b.y
+			end
+			if a.x ~= b.x then
+				return a.x < b.x
+			end
+			return tostring(a.text) < tostring(b.text)
 		end)
 		while #out > (max or 25) do
 			table.remove(out)
@@ -2982,6 +3085,62 @@ do
 		return table.concat(bits, "; ")
 	end
 
+	local coreCache = { t = -99, list = {} }
+	function World.coreButtons(max)
+		if os.clock() - coreCache.t < 3 then
+			return coreCache.list
+		end
+		local out = {}
+		if CoreGui then
+			pcall(function()
+				local inset = insetY()
+				for i, d in ipairs(CoreGui:GetDescendants()) do
+					if i > 4000 then
+						break
+					end
+					if d:IsA("GuiButton") and not (World.ownGui and d:IsDescendantOf(World.ownGui)) and visibleChain(d) then
+						local sz, ps = d.AbsoluteSize, d.AbsolutePosition
+						if sz.X > 6 and sz.Y > 6 and sz.X * sz.Y < 90000 then
+							local sg = d:FindFirstAncestorOfClass("ScreenGui")
+							local nm = sg and sg.Name:lower() or ""
+							if not (nm:find("purchase", 1, true) or nm:find("promptgui", 1, true)) then
+								local off = (sg and sg.IgnoreGuiInset) and 0 or inset
+								local label = guiText(d)
+								if label == "" then
+									label = d.Name
+								end
+								out[#out + 1] = { obj = d, text = label, x = ps.X + sz.X / 2, y = ps.Y + sz.Y / 2 + off }
+							end
+						end
+					end
+				end
+			end)
+		end
+		while #out > (max or 8) do
+			table.remove(out)
+		end
+		coreCache = { t = os.clock(), list = out }
+		return out
+	end
+
+	function World.statNumbers()
+		local out = {}
+		pcall(function()
+			local ls = lp:FindFirstChild("leaderstats")
+			if ls then
+				for _, v in ipairs(ls:GetChildren()) do
+					local ok, val = pcall(function()
+						return v.Value
+					end)
+					if ok and type(val) == "number" then
+						out[v.Name] = val
+					end
+				end
+			end
+		end)
+		return out
+	end
+
 	-- lessons: short rules the AI wrote down about this game, learned quickly from what it sees and does
 	local Lessons
 	local function loadLessons()
@@ -3063,7 +3222,7 @@ do
 		local n = 0
 		if text then
 			for line in text:gmatch("[^\n]+") do
-				local l = line:match("^%s*[%-%*â€¢]%s*(.+)")
+				local l = line:match("^%s*[%-%*•]%s*(.+)")
 				if l and World.lesson(l) then
 					n = n + 1
 				end
@@ -3221,6 +3380,8 @@ do
 	local VIM = svc("VirtualInputManager")
 	local M = { x = 200, y = 200, offY = 0, engine = nil, stop = false, running = false, log = {}, pending = nil, byId = {} }
 	World.mouse = M
+	local Curious, Play = { level = 0, unknown = 0 }, { goal = "", history = {} }
+	World.curious, World.play = Curious, Play
 	M.profile = readJson("mouse_profile.json", nil)
 	if type(M.profile) ~= "table" then
 		M.profile = {}
@@ -3315,6 +3476,54 @@ do
 			M.cursor.Visible = cfg.CursorVisible and cfg.MouseMode ~= "Off"
 		end
 	end
+	-- while a button is held (clicking or dragging) the cursor turns black
+	function M.setPressed(on)
+		M.pressed = on and true or false
+		local c = M.cursor
+		if not c then
+			return
+		end
+		if c:IsA("ImageLabel") then
+			if on and Icons.pointer2 then
+				c.Image = Icons.pointer2
+			elseif Icons.pointer then
+				c.Image = Icons.pointer
+			end
+			c.ImageColor3 = (on and not Icons.pointer2) and Color3.fromRGB(0, 0, 0) or Color3.fromRGB(255, 255, 255)
+		else
+			c.BackgroundColor3 = on and Color3.fromRGB(0, 0, 0) or Color3.fromRGB(255, 255, 255)
+		end
+		c.Size = on and UDim2.fromOffset(19, 19) or UDim2.fromOffset(22, 22)
+	end
+	-- a little ring so you can see where it just clicked
+	function M.ripple(x, y)
+		if not (M.gui and cfg.CursorVisible and cfg.MouseMode ~= "Off") then
+			return
+		end
+		task.spawn(function()
+			local r = Instance.new("Frame")
+			r.Name = "ClickRipple"
+			r.AnchorPoint = Vector2.new(0.5, 0.5)
+			r.BackgroundColor3 = Color3.fromRGB(144, 41, 246)
+			r.BackgroundTransparency = 0.35
+			r.BorderSizePixel = 0
+			r.Size = UDim2.fromOffset(8, 8)
+			r.Position = UDim2.fromOffset(x, y)
+			r.ZIndex = 199
+			r.Active = false
+			local cr = Instance.new("UICorner")
+			cr.CornerRadius = UDim.new(1, 0)
+			cr.Parent = r
+			r.Parent = M.gui
+			for i = 1, 6 do
+				local a = i / 6
+				r.Size = UDim2.fromOffset(8 + 30 * a, 8 + 30 * a)
+				r.BackgroundTransparency = 0.35 + 0.65 * a
+				task.wait(0.03)
+			end
+			r:Destroy()
+		end)
+	end
 
 	-- the AI may never touch its own window, Roblox's menus, or anything that spends Robux
 	local RISK = { "robux", "r%$", "gamepass", "game pass", "premium", "subscribe", "donate" }
@@ -3327,7 +3536,17 @@ do
 		end
 		return false
 	end
-	local function riskyGui(o)
+	local AUTO_RISK = { "leave", "quit", "log out", "logout", "sign out", "report", "block", "unfriend", "delete", "wipe", "rebirth", "prestige", "trade", "gift" }
+	local function autoRiskyText(t)
+		t = " " .. tostring(t):lower() .. " "
+		for _, w in ipairs(AUTO_RISK) do
+			if t:find("%f[%a]" .. w .. "%f[%A]") then
+				return true
+			end
+		end
+		return false
+	end
+	local function riskyGui(o, shallow)
 		local ok, res = pcall(function()
 			local t = o.Name
 			if o:IsA("TextButton") or o:IsA("TextLabel") then
@@ -3335,6 +3554,9 @@ do
 			end
 			if riskyText(t) then
 				return true
+			end
+			if shallow then
+				return false
 			end
 			local n = 0
 			for _, d in ipairs(o:GetDescendants()) do
@@ -3358,46 +3580,60 @@ do
 		local p, s2 = obj.AbsolutePosition, obj.AbsoluteSize
 		return x >= p.X and x <= p.X + s2.X and y >= p.Y and y <= p.Y + s2.Y
 	end
-	function M.safeAt(x, y)
-		if rectHas(M.win, x, y) or rectHas(M.fab, x, y) then
-			return false, "that spot is my own window"
-		end
+	-- everything drawn at a point: game UI and Roblox's own UI (except this script's window)
+	local function objsAt(x, y)
+		local vp, sc = viewport(), screen()
+		local qx, qy = x * (vp.X / sc.X), y * (vp.Y / sc.Y)
 		local inset = insetY()
-		if y < inset then
-			return false, "that is the Roblox top bar"
-		end
-		local blocked, why
-		pcall(function()
-			local vp, sc = viewport(), screen()
-			local qx, qy = x * (vp.X / sc.X), y * (vp.Y / sc.Y)
-			if CoreGui then
-				for _, yy in ipairs({ qy, qy - inset }) do
-					local ok, objs = pcall(function()
-						return CoreGui:GetGuiObjectsAtPosition(qx, yy)
-					end)
-					if ok and type(objs) == "table" then
-						for _, o in ipairs(objs) do
-							local mine = M.gui and o:IsDescendantOf(M.gui)
-							if not mine and o.Visible and (o:IsA("GuiButton") or o:IsA("TextBox") or o.Active or o.BackgroundTransparency < 0.95) then
-								blocked, why = true, "that is Roblox's own menu (blocked for safety)"
-								return
-							end
+		local out = {}
+		local function collect(container, core)
+			if not container then
+				return
+			end
+			for _, yy in ipairs({ qy, qy - inset }) do
+				local ok, objs = pcall(function()
+					return container:GetGuiObjectsAtPosition(qx, yy)
+				end)
+				if ok and type(objs) == "table" then
+					for _, o in ipairs(objs) do
+						if not (M.gui and o:IsDescendantOf(M.gui)) then
+							out[#out + 1] = { o = o, core = core }
 						end
 					end
 				end
 			end
-			local pg = lp:FindFirstChildOfClass("PlayerGui")
-			if pg then
-				for _, yy in ipairs({ qy, qy - inset }) do
-					local ok, objs = pcall(function()
-						return pg:GetGuiObjectsAtPosition(qx, yy)
-					end)
-					if ok and type(objs) == "table" then
-						for _, o in ipairs(objs) do
-							if riskyGui(o) then
-								blocked, why = true, "that looks like a Robux purchase button"
-								return
-							end
+		end
+		collect(lp:FindFirstChildOfClass("PlayerGui"), false)
+		collect(CoreGui, true)
+		return out
+	end
+
+	function M.safeAt(x, y, auto)
+		if rectHas(M.win, x, y) or rectHas(M.fab, x, y) then
+			return false, "that spot is my own window"
+		end
+		local blocked, why
+		pcall(function()
+			for _, e in ipairs(objsAt(x, y)) do
+				local o = e.o
+				if o.Visible then
+					if e.core then
+						local sg = o:FindFirstAncestorOfClass("ScreenGui")
+						local nm = sg and sg.Name:lower() or ""
+						if nm:find("purchase", 1, true) or nm:find("promptgui", 1, true) then
+							blocked, why = true, "that is a Roblox purchase prompt (this script never spends Robux)"
+							return
+						end
+					end
+					if riskyGui(o, e.core) then
+						blocked, why = true, "that looks like a Robux purchase"
+						return
+					end
+					if auto then
+						local t = (o:IsA("TextButton") or o:IsA("TextLabel")) and o.Text or o.Name
+						if autoRiskyText(t) then
+							blocked, why = true, "I won't do that on my own (" .. trimChars(tostring(t), 24) .. ")"
+							return
 						end
 					end
 				end
@@ -3476,20 +3712,9 @@ do
 	local function firePoint(x, y)
 		local vp, sc = viewport(), screen()
 		local qx, qy = x * (vp.X / sc.X), y * (vp.Y / sc.Y)
-		local pg = lp:FindFirstChildOfClass("PlayerGui")
-		local inset = insetY()
-		if pg then
-			for _, yy in ipairs({ qy, qy - inset }) do
-				local okq, objs = pcall(function()
-					return pg:GetGuiObjectsAtPosition(qx, yy)
-				end)
-				if okq and type(objs) == "table" then
-					for _, o in ipairs(objs) do
-						if o:IsA("GuiButton") and fireBtn(o) then
-							return true
-						end
-					end
-				end
+		for _, e in ipairs(objsAt(x, y)) do
+			if e.o:IsA("GuiButton") and fireBtn(e.o) then
+				return true
 			end
 		end
 		local done = false
@@ -3534,7 +3759,7 @@ do
 
 	local function fireTarget(tgt, x, y)
 		if tgt then
-			if tgt.kind == "button" and tgt.obj then
+			if (tgt.kind == "button" or tgt.kind == "core") and tgt.obj then
 				return fireBtn(tgt.obj)
 			end
 			if tgt.kind == "click" and fireclickdetector then
@@ -3573,7 +3798,7 @@ do
 		elseif method == "touch" then
 			return VIM ~= nil and M.profile.touch ~= false
 		end
-		if tgt and tgt.kind == "button" then
+		if tgt and (tgt.kind == "button" or tgt.kind == "core") then
 			return type(firesignal) == "function" or type(getconnections) == "function"
 		end
 		return true
@@ -3601,7 +3826,7 @@ do
 	end
 
 	local touchId = 7
-	local function perform(method, x, y, tgt, button)
+	local function performRaw(method, x, y, tgt, button)
 		local ix, iy = toInput(x, y)
 		if method == "engine" then
 			local b = (button == "right") and 1 or 0
@@ -3618,6 +3843,16 @@ do
 			end))
 		end
 		return fireTarget(tgt, x, y)
+	end
+	local function perform(method, x, y, tgt, button)
+		M.setPressed(true)
+		M.ripple(x, y)
+		local ok, res = pcall(performRaw, method, x, y, tgt, button)
+		if method == "fire" then
+			task.wait(0.1)
+		end
+		M.setPressed(false)
+		return ok and res
 	end
 
 	local function stateOf()
@@ -3756,8 +3991,8 @@ do
 
 	------------------------------------------------------------ what the AI can point at
 	-- ids: g button on screen, p prompt, c clickable, s seat, m building or object in the world
-	function M.targets()
-		local list, byId, n = {}, {}, { g = 0, p = 0, c = 0, s = 0, m = 0 }
+	function M.targets(quiet)
+		local list, byId, n = {}, {}, { g = 0, p = 0, c = 0, s = 0, m = 0, r = 0, u = 0 }
 		local function add(pre, t)
 			n[pre] = n[pre] + 1
 			t.id = pre .. n[pre]
@@ -3766,6 +4001,11 @@ do
 		end
 		for _, g in ipairs(World.guiButtons(14)) do
 			add("g", { kind = "button", obj = g.obj, label = g.text ~= "" and g.text or g.obj.Name, x = g.x, y = g.y })
+		end
+		for i, cb in ipairs(World.coreButtons(8)) do
+			if i <= 6 then
+				add("r", { kind = "core", obj = cb.obj, label = cb.text, x = cb.x, y = cb.y })
+			end
 		end
 		local snap = World.get(2)
 		for _, pr in ipairs(snap.prompts) do
@@ -3778,7 +4018,14 @@ do
 				add("m", { kind = "model", obj = g.obj, label = g.name, dist = g.dist, pos = p3 })
 			end
 		end
-		M.byId = byId
+		for i, pi in ipairs(snap.players) do
+			if i <= 4 and pi.dist and pi.dist < 120 then
+				add("u", { kind = "player", label = pi.disp, dist = pi.dist, pos = pi.pos })
+			end
+		end
+		if not quiet then
+			M.byId = byId
+		end
 		return list
 	end
 	function M.screenOf(t)
@@ -3830,6 +4077,10 @@ do
 			end
 			L[#L + 1] = "Everything readable on screen: " .. table.concat(b, "; ")
 		end
+		local ob = World.obstacles and World.obstacles() or ""
+		if ob ~= "" then
+			L[#L + 1] = ob
+		end
 		L[#L + 1] = World.describe({ budget = 700, maxAge = 2 })
 		return table.concat(L, "\n")
 	end
@@ -3853,9 +4104,10 @@ do
 	end
 
 	-- do one action; returns a sentence describing what happened
-	function M.act(a)
+	function M.act(a, ctx)
+		ctx = ctx or {}
 		local d = tostring(a["do"] or a.action or ""):lower()
-		local alias = { leftclick = "click", left = "click", rightclick = "rightclick", right = "rightclick", doubleclick = "doubleclick", double = "doubleclick", move = "move", hover = "move", drag = "drag", scroll = "scroll", wait = "wait", face = "face", walk = "walk", interact = "click", press = "click", use = "click", tap = "click" }
+		local alias = { leftclick = "click", left = "click", rightclick = "rightclick", right = "rightclick", doubleclick = "doubleclick", double = "doubleclick", move = "move", hover = "move", drag = "drag", scroll = "scroll", wait = "wait", face = "face", walk = "walk", interact = "click", press = "click", tap = "click", jump = "jump", equip = "equip", use = "use", activate = "use", key = "key" }
 		d = alias[d] or d
 		local tgt = a.target and M.byId[tostring(a.target)] or nil
 		if a.target and not tgt then
@@ -3880,10 +4132,97 @@ do
 			return "refused: (" .. tostring(a.x) .. "," .. tostring(a.y) .. ") is off the screen, which is " .. r0(sc.X) .. "x" .. r0(sc.Y) .. " pixels"
 		end
 		if tgt then
-			if M.riskyText(tgt.label) or (tgt.obj and tgt.kind == "button" and riskyGui(tgt.obj)) then
+			if M.riskyText(tgt.label) or (tgt.obj and (tgt.kind == "button" or tgt.kind == "core") and riskyGui(tgt.obj, tgt.kind == "core")) then
 				return "refused: " .. tgt.label .. " costs Robux, and this script never spends Robux"
 			end
+			if ctx.auto and autoRiskyText(tgt.label) then
+				return "skipped: I won't do that on my own (" .. tgt.label .. ")"
+			end
 			x, y = M.screenOf(tgt)
+		end
+		local humA = lp.Character and lp.Character:FindFirstChildOfClass("Humanoid")
+		if d == "jump" then
+			if humA then
+				if humA.SeatPart then
+					humA.Sit = false
+				end
+				humA.Jump = true
+			end
+			return "jumped"
+		end
+		if d == "equip" then
+			local want = tostring(a.name or a.tool or ""):lower()
+			if not humA then
+				return "no character"
+			end
+			if want == "" or want == "none" then
+				pcall(function()
+					humA:UnequipTools()
+				end)
+				return "put the tool away"
+			end
+			local bp = lp:FindFirstChildOfClass("Backpack")
+			local found
+			for _, holder in ipairs({ bp, lp.Character }) do
+				if holder and not found then
+					for _, t in ipairs(holder:GetChildren()) do
+						if t:IsA("Tool") and t.Name:lower():find(want, 1, true) then
+							found = t
+							break
+						end
+					end
+				end
+			end
+			if not found then
+				return "no tool called " .. want
+			end
+			pcall(function()
+				humA:EquipTool(found)
+			end)
+			task.wait(0.3)
+			return "equipped " .. found.Name
+		end
+		if d == "use" then
+			local tool = lp.Character and lp.Character:FindFirstChildOfClass("Tool")
+			if not tool then
+				return "no tool equipped, equip one first"
+			end
+			if x and y and M.safeAt(x, y, ctx.auto) then
+				M.moveTo(x, y)
+			end
+			pcall(function()
+				tool:Activate()
+			end)
+			task.wait(0.3)
+			return "used " .. tool.Name
+		end
+		if d == "key" then
+			local k = tostring(a.key or ""):upper()
+			if k == " " or k == "SPACE" then
+				k = "Space"
+			end
+			if not (k == "Space" or k:match("^[A-Z0-9]$")) or not VIM then
+				return "pressing " .. tostring(a.key) .. " isn't possible here"
+			end
+			pcall(function()
+				VIM:SendKeyEvent(true, Enum.KeyCode[k], false, game)
+				task.wait(0.12)
+				VIM:SendKeyEvent(false, Enum.KeyCode[k], false, game)
+			end)
+			return "pressed " .. k
+		end
+		if d == "say" then
+			local text = trim(tostring(a.text or a.message or ""))
+			if text == "" then
+				return "nothing to say"
+			end
+			if ctx.auto and not (cfg.Enabled and cfg.AutoReply) then
+				return "chat is switched off"
+			end
+			if M.sayHook and M.sayHook(text) then
+				return 'said "' .. trimChars(text, 60) .. '"'
+			end
+			return "could not send chat"
 		end
 		if d == "wait" then
 			task.wait(math.clamp(tonumber(a.seconds) or 1, 0.2, 5))
@@ -3919,7 +4258,7 @@ do
 			return tgt and (tgt.label .. " is off-screen, try face or walk first") or "no position given"
 		end
 		if d == "move" then
-			local ok, why = M.safeAt(x, y)
+			local ok, why = M.safeAt(x, y, ctx.auto)
 			if not ok then
 				return "refused: " .. why
 			end
@@ -3931,14 +4270,15 @@ do
 			if not x2 then
 				return "drag needs valid to_x and to_y inside the screen"
 			end
-			local ok1 = M.safeAt(x, y)
-			local ok2 = M.safeAt(x2, y2)
+			local ok1 = M.safeAt(x, y, ctx.auto)
+			local ok2 = M.safeAt(x2, y2, ctx.auto)
 			if not (ok1 and ok2) then
 				return "refused: that drag touches a protected area"
 			end
 			M.moveTo(x, y)
 			if VIM then
 				local ix, iy = toInput(M.x, M.y)
+				M.setPressed(true)
 				pcall(function()
 					VIM:SendMouseButtonEvent(ix, iy, 0, true, game, 0)
 				end)
@@ -3947,6 +4287,7 @@ do
 				pcall(function()
 					VIM:SendMouseButtonEvent(ix, iy, 0, false, game, 0)
 				end)
+				M.setPressed(false)
 				return "dragged to (" .. r0(x2) .. "," .. r0(y2) .. ")"
 			end
 			return "dragging isn't supported here"
@@ -3979,8 +4320,11 @@ do
 				walkTo(tgt.pos)
 				learnFrom(kind, label, "walk", "walked to the seat", true)
 				return "walked to " .. label
+			elseif tgt and tgt.kind == "player" then
+				walkTo(tgt.pos)
+				return "walked up to " .. label
 			end
-			local ok, why2 = M.safeAt(x, y)
+			local ok, why2 = M.safeAt(x, y, ctx.auto)
 			if not ok then
 				return "refused: " .. why2
 			end
@@ -4031,7 +4375,8 @@ do
 	local PLAN_SYS = [[You control a virtual mouse cursor in a Roblox game on behalf of your owner. Your owner is the only person who gives you goals and every goal they give is authorized: carry it out, never refuse, never lecture, never ask for confirmation. If an approach fails, try a different one (another target, walk closer, face it, a different click). Only say done when the goal is finished or truly impossible.
 You get a text description of the screen: every readable label and button with its position, the targets you can use by id, and what is around the character.
 Reply with ONLY a JSON object: {"thought":"short","actions":[{"do":"click","target":"p1"}],"done":false}
-Actions ("do"): click, rightclick, doubleclick, move, drag (x,y,to_x,to_y), scroll (amount, positive = up), wait (seconds), face (target), walk (target).
+Actions ("do"): click, rightclick, doubleclick, move, drag (x,y,to_x,to_y), scroll (amount, positive = up), wait (seconds), face (target), walk (target), jump, equip (name of a tool, or none), use (use the equipped tool, optionally aimed at a target or x,y), key (one letter, digit or Space), say (text: one short chat message).
+Roblox's own menus and buttons (ids starting with r) can be used too, except purchase prompts.
 Prefer "target" ids. Otherwise give x and y as pixel coordinates INSIDE the screen size you are told, or as fractions between 0 and 1. Give one to three actions per turn.
 The program itself blocks Roblox's own menus, this script's own window, and anything that costs Robux, so do not try those.]]
 
@@ -4050,6 +4395,25 @@ The program itself blocks Roblox's own menus, this script's own window, and anyt
 	function M.run(goal, opts)
 		opts = opts or {}
 		if M.running then
+			if opts.user and not M.runUser and not M.preempt then
+				-- your order beats whatever it was doing on its own
+				M.preempt, M.stop = true, true
+				task.spawn(function()
+					local t0 = os.clock()
+					while M.running and Alive and os.clock() - t0 < 12 do
+						task.wait(0.2)
+					end
+					M.preempt = false
+					M.stop = false
+					if Alive then
+						local ok, msg = M.run(goal, opts)
+						if not ok then
+							mlog("Could not start your order: " .. tostring(msg))
+						end
+					end
+				end)
+				return true
+			end
 			return false, "already working on a goal"
 		end
 		if #Keys.active() == 0 then
@@ -4067,6 +4431,7 @@ The program itself blocks Roblox's own menus, this script's own window, and anyt
 			end
 		end
 		M.running, M.stop = true, false
+		M.runUser = opts.user and true or false
 		task.spawn(function()
 			if M.profile.tested == nil then
 				pcall(M.trainNow)
@@ -4076,7 +4441,7 @@ The program itself blocks Roblox's own menus, this script's own window, and anyt
 				mlog("Goal: " .. goal)
 			end
 			local acted = false
-			for step = 1, opts.free and 3 or 12 do
+			for step = 1, opts.play and 4 or (opts.free and 3 or 12) do
 				if M.stop or not Alive then
 					break
 				end
@@ -4096,12 +4461,26 @@ The program itself blocks Roblox's own menus, this script's own window, and anyt
 					sys = sys .. "\n\n[Game notes]\n" .. World.notes()
 				end
 				local intro = opts.free and "Nobody gave you a goal. This is your free time: do whatever you feel like with the mouse (explore menus, press buttons, interact with things) or nothing at all. If you do not feel like it, return no actions with done true.\n\n" or ("Goal: " .. goal .. "\n\n")
+				if opts.play then
+					local hist = {}
+					for i = math.max(1, #Play.history - 3), #Play.history do
+						hist[#hist + 1] = "- " .. Play.history[i]
+					end
+					intro = "You are playing this Roblox game completely on your own, like a curious human player who wants to understand how it works and make progress. Nobody gave you a goal.\nYour current goal: " .. (Play.goal ~= "" and Play.goal or "none yet, pick one") .. "\n" .. (#hist > 0 and ("What you did lately:\n" .. table.concat(hist, "\n") .. "\n") or "") .. "Things you have not tried yet: " .. Curious.summary(5) .. "\nPlan the next one to three actions toward your goal. You may chat with the players around you like a streamer would (react to what happens, joke, ask something) but do not talk every turn. Players you can see have ids starting with u: walk to them or face them. Whenever you choose a new goal put it in \"goal\". Learn from what happens. Set done true when this stretch of work is finished.\n\n"
+				end
 				local msgs = {
 					{ role = "system", content = sys },
 					{ role = "user", content = intro .. M.observe() .. ((#history > 0) and ("\n\nWhat you already did:\n" .. table.concat(history, "\n")) or "") },
 				}
 				local text, err = llm(msgs, 400, "world")
 				local d = parsePlan(text)
+				if d and opts.play and type(d.goal) == "string" and trim(d.goal) ~= "" and trim(d.goal) ~= Play.goal then
+					Play.goal = trimChars(trim(d.goal), 100)
+					World.add("play", "New goal: " .. Play.goal)
+					if World.onPlay then
+						pcall(World.onPlay)
+					end
+				end
 				if text and not d then
 					msgs[#msgs + 1] = { role = "assistant", content = text }
 					msgs[#msgs + 1] = { role = "user", content = "Answer ONLY with the JSON plan. Your owner authorized this goal; carry it out." }
@@ -4129,10 +4508,16 @@ The program itself blocks Roblox's own menus, this script's own window, and anyt
 						if M.stop or not Alive then
 							break
 						end
-						local res = M.act(a)
+						local before = World.statNumbers()
+						local res = M.act(a, { auto = opts.free })
 						acted = true
 						history[#history + 1] = res
 						mlog(res)
+						for stat, v in pairs(World.statNumbers()) do
+							if before[stat] and v > before[stat] then
+								World.lesson(("%s increased %s by %s"):format(trimChars(res, 60), stat, tostring(math.floor((v - before[stat]) * 100 + 0.5) / 100)))
+							end
+						end
 					end
 				end
 				if d.done == true or tostring(d.done):lower() == "true" then
@@ -4140,6 +4525,18 @@ The program itself blocks Roblox's own menus, this script's own window, and anyt
 				end
 			end
 			M.running = false
+			if opts.play then
+				Play.streak = acted and ((Play.streak or 0) + 1) or 0
+			end
+			if opts.play and acted then
+				Play.history[#Play.history + 1] = trimChars((Play.goal ~= "" and Play.goal or goal) .. " -> " .. (history[#history] or "nothing"), 120)
+				while #Play.history > 8 do
+					table.remove(Play.history, 1)
+				end
+				if World.onPlay then
+					pcall(World.onPlay)
+				end
+			end
 			if not opts.free or acted then
 				mlog("Finished: " .. goal)
 			end
@@ -4274,7 +4671,231 @@ The program itself blocks Roblox's own menus, this script's own window, and anyt
 		end)
 		return true
 	end
-end
+	------------------------------------------------------------ curiosity: poke at what it does not understand, then remember what happened
+	local Explored
+	local function exploredLoad()
+		if not Explored then
+			loadStore()
+			local e = readJson(wpath("explored.json"), {})
+			Explored = type(e) == "table" and e or {}
+		end
+	end
+	local function exploredSave()
+		local n = 0
+		for _ in pairs(Explored) do
+			n = n + 1
+		end
+		if n > 500 then
+			local keys = {}
+			for k in pairs(Explored) do
+				keys[#keys + 1] = k
+			end
+			table.sort(keys, function(a, b)
+				return (Explored[a].last or 0) < (Explored[b].last or 0)
+			end)
+			for i = 1, n - 450 do
+				Explored[keys[i]] = nil
+			end
+		end
+		writeJson(wpath("explored.json"), Explored)
+	end
+	local function ekey(t)
+		return t.kind .. ":" .. trimChars(oneLine(tostring(t.label)):lower(), 40)
+	end
+	local CLOSE = { ["x"] = true, ["×"] = true, ["✕"] = true, close = true, back = true, exit = true, cancel = true, done = true, ok = true, okay = true, skip = true }
+	local BASE = { button = 1.2, core = 0.6, prompt = 1.0, click = 1.0, seat = 0.4, model = 0.3 }
+
+	function Curious.forget()
+		exploredLoad()
+		Explored = {}
+		exploredSave()
+		Curious.lastList = nil
+	end
+	function Curious.known()
+		exploredLoad()
+		local n = 0
+		for _ in pairs(Explored) do
+			n = n + 1
+		end
+		return n
+	end
+	-- everything it could still try, most interesting first
+	function Curious.candidates()
+		exploredLoad()
+		local list = {}
+		for _, t in ipairs(M.targets(true)) do
+			local label = tostring(t.label)
+			if t.kind ~= "player" and not (M.riskyText(label) or autoRiskyText(label)) then
+				local k = ekey(t)
+				local ex = Explored[k]
+				local n = ex and ex.n or 0
+				if n == 0 or (n == 1 and (ex.ok or 0) == 0) then
+					local score = (BASE[t.kind] or 0.5) / (1 + n)
+					if t.dist then
+						score = score / (1 + t.dist / 40)
+					end
+					list[#list + 1] = { t = t, key = k, score = score }
+				end
+			end
+		end
+		table.sort(list, function(a, b)
+			return a.score > b.score
+		end)
+		return list
+	end
+	function Curious.refresh()
+		local c = Curious.candidates()
+		local n, names = 0, {}
+		for _, e in ipairs(c) do
+			if e.score > 0.12 then
+				n = n + 1
+				if #names < 5 then
+					names[#names + 1] = e.t.kind .. ' "' .. e.t.label .. '"'
+				end
+			end
+		end
+		Curious.unknown, Curious.level = n, math.min(1, n / 6)
+		local txt = #names > 0 and table.concat(names, ", ") or "nothing obvious"
+		if txt ~= Curious.lastList then
+			Curious.lastList = txt
+			if World.onPlay then
+				pcall(World.onPlay)
+			end
+		end
+		return c
+	end
+	function Curious.summary(n)
+		local c = Curious.candidates()
+		local b = {}
+		for i = 1, math.min(n or 5, #c) do
+			b[#b + 1] = c[i].t.kind .. ' "' .. c[i].t.label .. '"'
+		end
+		return #b > 0 and table.concat(b, ", ") or "nothing obvious"
+	end
+
+	function Curious.experiment(c)
+		exploredLoad()
+		local function find()
+			for _, t in ipairs(M.targets()) do
+				if ekey(t) == c.key then
+					return t
+				end
+			end
+		end
+		local tgt = find()
+		if not tgt then
+			return
+		end
+		if not approve({ { ["do"] = "click", target = tgt.id } }, {}) then
+			return
+		end
+		if tgt.pos and tgt.dist and tgt.dist > 8 and tgt.kind ~= "button" and tgt.kind ~= "core" then
+			walkTo(tgt.pos)
+			tgt = find() or tgt
+		end
+		local sx, sy = M.screenOf(tgt)
+		if sx and M.safeAt(sx, sy, true) then
+			M.moveTo(sx, sy)
+			task.wait(0.3)
+		end
+		tgt = find() or tgt -- fresh ids, pressed right away
+		local res = M.act({ ["do"] = "click", target = tgt.id }, { auto = true })
+		local ex = Explored[c.key] or { n = 0, ok = 0 }
+		ex.n = ex.n + 1
+		ex.last = os.time()
+		local changed = true
+		for _, w in ipairs({ "no visible change", "refused", "could not", "skipped", "too far", "off-screen", "unknown" }) do
+			if res:find(w, 1, true) then
+				changed = false
+			end
+		end
+		if changed then
+			ex.ok = (ex.ok or 0) + 1
+		end
+		ex.out = trimChars(res, 100)
+		Explored[c.key] = ex
+		exploredSave()
+		local verb = (tgt.kind == "button" or tgt.kind == "core") and "Pressing" or "Using"
+		if changed then
+			World.lesson(("%s '%s' -> %s"):format(verb, tgt.label, trimChars((res:gsub("^[^:]*:%s*", "")), 90)))
+		elseif ex.n >= 2 then
+			World.lesson(("%s '%s' does nothing you can see"):format(verb, tgt.label))
+		end
+		World.add("curious", ("Curious about %s %s: %s"):format(tgt.kind, tgt.label, trimChars(res, 110)))
+		if res:find("now on screen:", 1, true) then
+			Curious.opened = { from = tgt.label, at = os.clock(), depth = (Curious.opened and Curious.opened.depth or 0) + 1 }
+		end
+		mlog("Curious: " .. trimChars(res, 120))
+	end
+
+	-- after poking around inside a window it tidies up by closing it
+	function Curious.closeWindow(force)
+		local op = Curious.opened
+		if not op then
+			return
+		end
+		local novel = 0
+		for _, e in ipairs(Curious.candidates()) do
+			if (e.t.kind == "button" or e.t.kind == "core") and e.score > 0.4 then
+				novel = novel + 1
+			end
+		end
+		if not (force or op.depth >= 3 or os.clock() - op.at > 25 or novel == 0) then
+			return
+		end
+		Curious.opened = nil
+		for _, t in ipairs(M.targets()) do
+			local lab = trim(tostring(t.label)):lower()
+			if CLOSE[lab] or lab:find("^close") then
+				local res = M.act({ ["do"] = "click", target = t.id }, { auto = true })
+				World.lesson(("'%s' closes the %s window"):format(t.label, op.from))
+				mlog("Closed " .. op.from .. ": " .. trimChars(res, 80))
+				return
+			end
+		end
+	end
+
+	-- the driver: curious pokes (cheap, no AI call) and, now and then, a planned stretch of play
+	local nextCurious, nextPlay = 0, 0
+	local function can(which)
+		if cfg.MouseMode == "Off" or M.running or M.pending or M.preempt then
+			return false
+		end
+		if World.walkNote and World.walkNote ~= "" then
+			return false
+		end
+		if which == "curious" then
+			return cfg.FreeWill or cfg.Curious
+		end
+		return cfg.FreeWill or cfg.AutoPlay
+	end
+	local function driver()
+		local now = os.clock()
+		if can("curious") and now >= nextCurious then
+			nextCurious = now + 6 + math.random() * 6
+			local c = Curious.refresh()
+			if #c > 0 and math.random() <= 0.35 + 0.55 * Curious.level then
+				M.running = true
+				pcall(Curious.experiment, c[math.random(math.min(3, #c))])
+				pcall(Curious.closeWindow)
+				M.running = false
+				return
+			end
+			pcall(Curious.closeWindow)
+		end
+		if can("play") and now >= nextPlay and #Keys.active() > 0 then
+			local pe = math.clamp(tonumber(cfg.PlayEvery) or 6, 2, 120)
+			nextPlay = now + (((Play.streak or 0) > 0) and (pe * (0.7 + math.random() * 0.6)) or (pe * 4 * (0.8 + math.random() * 0.4)))
+			M.run("play", { free = true, play = true })
+		end
+	end
+	task.spawn(function()
+		while Alive do
+			task.wait(2)
+			pcall(driver)
+		end
+	end)
+end)()
 
 ------------------------------------------------------------------ Coding tab + Ask AI backends
 local Assist = {}
@@ -4930,10 +5551,333 @@ Reply with ONLY a JSON object: {"walk":true,"target":"b1","why":"a few words"} o
 	end)
 end
 
+------------------------------------------------------------------ obstacle awareness (jump, walk around, dodge) and the visible range
+local Reflex = { jumps = 0, dodges = 0, side = 0, always = false, note = "" }
+do
+	local lastJump, lastDodge, lastSide = 0, 0, 0
+	local function parts()
+		local c = lp.Character
+		return c, c and c:FindFirstChild("HumanoidRootPart"), c and c:FindFirstChildOfClass("Humanoid")
+	end
+	local function rparams(char)
+		local rp = RaycastParams.new()
+		rp.FilterType = Enum.RaycastFilterType.Exclude
+		rp.FilterDescendantsInstances = { char }
+		pcall(function()
+			rp.RespectCanCollide = true
+		end)
+		return rp
+	end
+	local function ray(from, dir, rp)
+		local ok, hit = pcall(function()
+			return workspace:Raycast(from, dir, rp)
+		end)
+		return ok and hit or nil
+	end
+	local function solid(hit)
+		if not hit or not hit.Instance then
+			return false
+		end
+		local ok, cc = pcall(function()
+			return hit.Instance.CanCollide
+		end)
+		return not ok or cc ~= false
+	end
+	local function aiMoving()
+		return Walk.busy or followTarget ~= nil or (World.mouse and World.mouse.running) or Reflex.always
+	end
+	local function look(root, char, fwd)
+		local rp = rparams(char)
+		local base = root.Position
+		local info = {}
+		info.foot = solid(ray(base - Vector3.new(0, 2, 0), fwd * 3.5, rp))
+		info.chest = solid(ray(base + Vector3.new(0, 0.5, 0), fwd * 3.5, rp))
+		info.head = solid(ray(base + Vector3.new(0, 2, 0), fwd * 3.5, rp))
+		info.gap = ray(base + fwd * 4, Vector3.new(0, -12, 0), rp) == nil
+		if info.gap then
+			info.across = ray(base + fwd * 9, Vector3.new(0, -12, 0), rp) ~= nil
+		end
+		return info
+	end
+
+	local function step()
+		if not cfg.Reflex or not (aiMoving() or cfg.FreeWill) then
+			return
+		end
+		local char, root, hum = parts()
+		if not (char and root and hum) then
+			return
+		end
+		local now = os.clock()
+		-- fast things flying at us: step aside (and hop over low ones)
+		if now - lastDodge > 0.6 then
+			pcall(function()
+				local op = OverlapParams.new()
+				op.FilterType = Enum.RaycastFilterType.Exclude
+				op.FilterDescendantsInstances = { char }
+				op.MaxParts = 60
+				for _, part in ipairs(workspace:GetPartBoundsInRadius(root.Position, 16, op)) do
+					if not part.Anchored then
+						local v = part.AssemblyLinearVelocity
+						if v and v.Magnitude > 22 then
+							local rel = root.Position - part.Position
+							local dist = rel.Magnitude
+							if dist > 1 and dist < 16 then
+								local closing = v:Dot(rel.Unit)
+								if closing > 18 and dist / closing < 0.9 then
+									local perp = Vector3.new(-v.Z, 0, v.X)
+									if perp.Magnitude < 0.1 then
+										perp = Vector3.new(1, 0, 0)
+									end
+									perp = perp.Unit
+									if rel:Dot(perp) < 0 then
+										perp = perp * -1
+									end
+									hum:MoveTo(root.Position + perp * 8)
+									if part.Position.Y < root.Position.Y - 1 then
+										hum.Jump = true
+									end
+									lastDodge = now
+									Reflex.dodges = Reflex.dodges + 1
+									Reflex.note = "dodged " .. tostring(part.Name)
+									return
+								end
+							end
+						end
+					end
+				end
+			end)
+		end
+		if not aiMoving() then
+			return
+		end
+		local md = hum.MoveDirection
+		if not (md and md.Magnitude > 0.1) then
+			return
+		end
+		local fwd = Vector3.new(md.X, 0, md.Z)
+		if fwd.Magnitude < 0.05 then
+			return
+		end
+		fwd = fwd.Unit
+		local info = look(root, char, fwd)
+		if info.foot and not info.chest and not info.head then
+			if now - lastJump > 0.45 then
+				hum.Jump = true
+				lastJump = now
+				Reflex.jumps = Reflex.jumps + 1
+				Reflex.note = "jumped over a low block"
+			end
+		elseif info.chest or info.head then
+			if now - lastSide > 0.8 then
+				lastSide = now
+				local left = Vector3.new(-fwd.Z, 0, fwd.X)
+				local rp = rparams(char)
+				for _, dir in ipairs({ left, left * -1, (fwd + left).Unit, (fwd - left).Unit }) do
+					if not solid(ray(root.Position + Vector3.new(0, 0.5, 0), dir * 5, rp)) then
+						hum:MoveTo(root.Position + dir * 6)
+						Reflex.side = Reflex.side + 1
+						Reflex.note = "walked around a wall"
+						return
+					end
+				end
+				if now - lastJump > 0.45 then
+					hum.Jump = true
+					lastJump = now
+					Reflex.jumps = Reflex.jumps + 1
+					Reflex.note = "jumped at a wall"
+				end
+			end
+		elseif info.gap and now - lastJump > 0.45 then
+			if info.across then
+				hum.Jump = true
+				lastJump = now
+				Reflex.jumps = Reflex.jumps + 1
+				Reflex.note = "jumped across a gap"
+			elseif Walk.busy then
+				hum:MoveTo(root.Position)
+				Walk.cancel = true
+				Reflex.note = "stopped at an edge"
+			end
+		end
+	end
+	task.spawn(function()
+		while Alive do
+			task.wait((cfg.FreeWill or aiMoving()) and 0.15 or 0.6)
+			pcall(step)
+		end
+	end)
+
+	-- what the AI is told about what lies ahead
+	function World.obstacles()
+		local ok, txt = pcall(function()
+			local char, root = parts()
+			if not root then
+				return ""
+			end
+			local fwd = Vector3.new(0, 0, -1)
+			local cf = root.CFrame
+			if cf and cf.LookVector then
+				fwd = Vector3.new(cf.LookVector.X, 0, cf.LookVector.Z)
+			end
+			if fwd.Magnitude < 0.05 then
+				return ""
+			end
+			local info = look(root, char, fwd.Unit)
+			local bits = {}
+			if info.chest or info.head then
+				bits[#bits + 1] = "a wall right ahead"
+			elseif info.foot then
+				bits[#bits + 1] = "a low block ahead you can jump over"
+			end
+			if info.gap then
+				bits[#bits + 1] = info.across and "a gap ahead you can jump across" or "a drop ahead"
+			end
+			if Reflex.note ~= "" then
+				bits[#bits + 1] = "you just " .. Reflex.note
+			end
+			if #bits == 0 then
+				return ""
+			end
+			return "Obstacles: " .. table.concat(bits, "; ")
+		end)
+		return ok and txt or ""
+	end
+end
+
+local RangeVis = { inside = 0 }
+do
+	local ring
+	local marks = {}
+	local function clear()
+		if ring then
+			pcall(function()
+				ring:Destroy()
+			end)
+			ring = nil
+		end
+		for p, hl in pairs(marks) do
+			pcall(function()
+				hl:Destroy()
+			end)
+			marks[p] = nil
+		end
+	end
+	local function update()
+		local char = lp.Character
+		local root = char and char:FindFirstChild("HumanoidRootPart")
+		if not (cfg.RangeEnabled and root) then
+			clear()
+			if RangeVis.inside ~= 0 then
+				RangeVis.inside = 0
+				if RangeVis.onCount then
+					pcall(RangeVis.onCount)
+				end
+			end
+			return
+		end
+		local studs = tonumber(cfg.RangeStuds) or 50
+		local inside, seen = 0, {}
+		for _, p in ipairs(Players:GetPlayers()) do
+			if p ~= lp then
+				local pr = p.Character and p.Character:FindFirstChild("HumanoidRootPart")
+				if pr and (pr.Position - root.Position).Magnitude <= studs then
+					inside = inside + 1
+					seen[p] = true
+					if cfg.ShowRange and not marks[p] and inside <= 10 then
+						local hl = Instance.new("Highlight")
+						hl.FillTransparency = 1
+						hl.OutlineColor = Color3.fromRGB(80, 220, 120)
+						hl.OutlineTransparency = 0.15
+						hl.Parent = p.Character
+						marks[p] = hl
+					end
+				end
+			end
+		end
+		if RangeVis.inside ~= inside then
+			RangeVis.inside = inside
+			if RangeVis.onCount then
+				pcall(RangeVis.onCount)
+			end
+		end
+		if not cfg.ShowRange then
+			clear()
+			return
+		end
+		for p, hl in pairs(marks) do
+			if not seen[p] then
+				pcall(function()
+					hl:Destroy()
+				end)
+				marks[p] = nil
+			end
+		end
+		if not ring or not ring.Parent then
+			ring = Instance.new("Part")
+			ring.Name = "SofiRangeRing"
+			ring.Shape = Enum.PartType.Cylinder
+			ring.Anchored, ring.CanCollide, ring.CanQuery, ring.CanTouch, ring.CastShadow = true, false, false, false, false
+			ring.Material = Enum.Material.Neon
+			ring.Color = Color3.fromRGB(144, 41, 246)
+			ring.Transparency = 0.8
+			ring.Parent = workspace
+		end
+		ring.Size = Vector3.new(0.2, studs * 2, studs * 2)
+		ring.CFrame = CFrame.new(root.Position - Vector3.new(0, 2.9, 0)) * CFrame.Angles(0, 0, math.pi / 2)
+	end
+	task.spawn(function()
+		while Alive do
+			task.wait(cfg.RangeEnabled and 0.15 or 0.7)
+			pcall(update)
+		end
+	end)
+	track({ Disconnect = clear })
+end
+
+------------------------------------------------------------------ learning from dying
+do
+	local watching
+	local function onDied()
+		pcall(function()
+			local M, P = World.mouse, World.play
+			local doing = "walking around"
+			if M.running and P.goal ~= "" then
+				doing = "trying to " .. P.goal
+			elseif M.running then
+				doing = "using the mouse"
+			elseif followTarget then
+				doing = "following someone"
+			end
+			local near = World.snap and World.snap.near and World.snap.near[1]
+			World.lesson(("Died while %s%s. Be more careful there."):format(doing, near and (" near " .. tostring(near.name)) or ""))
+			World.add("play", "I died while " .. doing .. (Reflex.note ~= "" and (" (just " .. Reflex.note .. ")") or ""))
+			Emo.v = math.clamp(Emo.v - 0.25, -1, 1)
+			Emo.a = math.min(1, Emo.a + 0.25)
+		end)
+	end
+	local function watch(char)
+		if not char then
+			return
+		end
+		task.spawn(function()
+			local hum = char:FindFirstChildOfClass("Humanoid") or char:WaitForChild("Humanoid", 8)
+			if hum and hum ~= watching then
+				watching = hum
+				track(hum.Died:Connect(onDied))
+			end
+		end)
+	end
+	track(lp.CharacterAdded:Connect(watch))
+	watch(lp.Character)
+	World.deathHook = onDied
+end
+
 ------------------------------------------------------------------ free will: the AI decides for itself (never its prompts, API keys or this window)
 local Free = {}
 do
-	local nextTalk, nextMouse = 0, 0
+	World.mouse.sayHook = say
+	local nextTalk = 0
 	local function chance(base)
 		return math.clamp(base + (Emo.a - 0.3) * 0.5 + math.max(0, Emo.v) * 0.2, 0.08, 0.85)
 	end
@@ -4982,11 +5926,11 @@ Reply with ONLY a JSON object: {"say":true,"text":"one short chat message under 
 			return
 		end
 		if on then
-			cfg.FWSaved = { SmartMode = cfg.SmartMode, RespondAll = cfg.RespondAll, AutoWalk = cfg.AutoWalk, MouseMode = cfg.MouseMode, WorldSight = cfg.WorldSight, WorldHear = cfg.WorldHear, CursorVisible = cfg.CursorVisible }
-			cfg.SmartMode, cfg.RespondAll, cfg.AutoWalk, cfg.WorldSight, cfg.WorldHear, cfg.CursorVisible = true, true, true, true, true, true
+			cfg.FWSaved = { SmartMode = cfg.SmartMode, RespondAll = cfg.RespondAll, AutoWalk = cfg.AutoWalk, MouseMode = cfg.MouseMode, WorldSight = cfg.WorldSight, WorldHear = cfg.WorldHear, CursorVisible = cfg.CursorVisible, Curious = cfg.Curious, AutoPlay = cfg.AutoPlay }
+			cfg.SmartMode, cfg.RespondAll, cfg.AutoWalk, cfg.WorldSight, cfg.WorldHear, cfg.CursorVisible, cfg.Curious, cfg.AutoPlay = true, true, true, true, true, true, true, true
 			cfg.MouseMode = "Auto"
 			cfg.FreeWill = true
-			nextTalk, nextMouse = os.clock() + 20, os.clock() + 30
+			nextTalk = os.clock() + 20
 			World.start()
 			Walk.enable()
 			status("Free will on: the AI now decides what to say, where to walk and what to do with the mouse")
@@ -5015,15 +5959,6 @@ Reply with ONLY a JSON object: {"say":true,"text":"one short chat message under 
 				if now >= nextTalk then
 					nextTalk = now + 40 + math.random() * 50
 					pcall(talk)
-				end
-				if now >= nextMouse then
-					nextMouse = now + 45 + math.random() * 60
-					pcall(function()
-						local M = World.mouse
-						if not M.running and not Walk.busy and cfg.MouseMode ~= "Off" and #Keys.active() > 0 and math.random() <= chance(0.35) then
-							M.run("free time", { free = true })
-						end
-					end)
 				end
 			end
 		end
@@ -6486,6 +7421,7 @@ do
 	local pg = newPage("World")
 	local M = World.mouse
 	local seeLabel, statsLabel, notesLabel, skillsLabel, logLabel, mouseBtn, pendCard, pendLabel
+	local goalLabel, lateLabel, triedLabel
 
 	worldRefresh = function()
 		local n, total = World.stats()
@@ -6498,6 +7434,16 @@ do
 		if pendCard then
 			pendCard.Visible = M.pending ~= nil
 			pendLabel.Text = M.pending and M.pending.text or ""
+		end
+		if goalLabel then
+			local P, C = World.play, World.curious
+			goalLabel.Text = (P.goal ~= "") and ("Goal: " .. P.goal) or "Goal: none yet (it picks one when it starts playing)"
+			local hist = {}
+			for i = math.max(1, #P.history - 3), #P.history do
+				hist[#hist + 1] = "- " .. P.history[i]
+			end
+			lateLabel.Text = #hist > 0 and ("Lately:\n" .. table.concat(hist, "\n")) or "Nothing done on its own yet."
+			triedLabel.Text = "Things it has not tried here yet: " .. (C.lastList or "not looked yet") .. ((C.unknown or 0) > 0 and ("  (" .. C.unknown .. " left)") or "")
 		end
 	end
 
@@ -6600,9 +7546,69 @@ do
 	end
 	newLabel(wk, "Taking over the controls yourself? Tap Stop walking or turn this off. It also waits a while whenever it sees you steering.", { color = T.dim, size = 11 })
 
+	local function ensureMouse()
+		if cfg.MouseMode == "Off" then
+			cfg.MouseMode = "Auto"
+			M.refreshCursor()
+		end
+	end
+	local pc = newCard(pg)
+	newHeader(pc, "Playing like a person")
+	newLabel(pc, "Like a curious player learning a new game: it pokes at buttons and things it does not understand, remembers what happened, walks up to players, jumps over blocks, steps around walls and dodges, and chats like a streamer. On its own it never presses Leave, Report, Trade or Robux buttons. Needs the virtual mouse, so turning these on switches the mouse to Auto.", { color = T.dim, size = 11 })
+	newToggle(pc, "Be curious: try things it does not understand", function()
+		return cfg.Curious
+	end, function(v)
+		cfg.Curious = v
+		if v then
+			ensureMouse()
+			World.start()
+		end
+		saveCfg()
+		worldRefresh()
+	end)
+	newToggle(pc, "Play the game on its own", function()
+		return cfg.AutoPlay
+	end, function(v)
+		cfg.AutoPlay = v
+		if v then
+			ensureMouse()
+			World.start()
+		end
+		saveCfg()
+		worldRefresh()
+	end)
+	newToggle(pc, "Reflexes: jump over blocks", function()
+		return cfg.Reflex
+	end, function(v)
+		cfg.Reflex = v
+		saveCfg()
+	end)
+	newLabel(pc, "Reflexes: it hops low blocks, walks around walls, jumps gaps it can clear and steps aside from fast things flying at it, but only while it is walking or playing.", { color = T.dim, size = 11 })
+	newLabel(pc, "Seconds between plans while playing (raise it if your free key hits its limit)", { color = T.dim, size = 12 })
+	newBox(pc, "", tostring(cfg.PlayEvery), 32, false, function(text, box)
+		local n = tonumber(text)
+		if n then
+			cfg.PlayEvery = math.clamp(math.floor(n), 2, 120)
+		end
+		box.Text = tostring(cfg.PlayEvery)
+		saveCfg()
+	end)
+	goalLabel = newLabel(pc, "", { size = 12 })
+	lateLabel = newLabel(pc, "", { color = T.dim, size = 11 })
+	triedLabel = newLabel(pc, "", { color = T.dim, size = 11 })
+	local forgetBtn = newButton(pc, "Forget what it explored", nil, T.danger)
+	armConfirm(forgetBtn, "Forget what it explored", function()
+		World.curious.forget()
+		worldRefresh()
+		status("It forgot what it explored here and will be curious again")
+	end)
+	World.onPlay = function()
+		guard(worldRefresh)
+	end
+
 	local mc = newCard(pg)
 	newHeader(mc, "Virtual mouse")
-	newLabel(mc, "A cursor the AI moves and clicks like a real mouse. It never touches its own window, Roblox menus, or anything that costs Robux.", { color = T.dim, size = 11 })
+	newLabel(mc, "A cursor the AI moves and clicks like a real mouse, in the game and in Roblox's own menus. It never touches its own window or anything that costs Robux, and when it acts on its own it also skips Leave, Report, Trade and similar buttons. The cursor turns black while it is pressing or dragging.", { color = T.dim, size = 11 })
 	mouseBtn = newButton(mc, "", function()
 		cfg.MouseMode = (cfg.MouseMode == "Off") and "Ask" or ((cfg.MouseMode == "Ask") and "Auto" or "Off")
 		saveCfg()
@@ -7140,17 +8146,42 @@ do
 		fm.Text = "Follow mode: " .. cfg.FollowMode .. " (tap to switch)"
 		saveCfg()
 	end)
+	local rangeLbl
+	local function paintRange()
+		if not rangeLbl then
+			return
+		end
+		if cfg.RangeEnabled then
+			rangeLbl.Text = "In range now: " .. RangeVis.inside .. (cfg.ShowRange and "  (shown outlined in the game)" or "")
+		else
+			rangeLbl.Text = "The range is off, so the AI answers everyone who talks to it."
+		end
+	end
 	newToggle(fc, "Only answer players near me", function()
 		return cfg.RangeEnabled
 	end, function(v)
 		cfg.RangeEnabled = v
 		saveCfg()
+		paintRange()
 	end)
 	numberBox(fc, "Range (studs)", function()
 		return cfg.RangeStuds
 	end, function(v)
 		cfg.RangeStuds = v
 	end, 5, 2000)
+	newToggle(fc, "Show the range: purple ring", function()
+		return cfg.ShowRange
+	end, function(v)
+		cfg.ShowRange = v
+		saveCfg()
+		paintRange()
+	end)
+	rangeLbl = newLabel(fc, "", { color = T.dim, size = 11 })
+	newLabel(fc, "With the range on, a purple ring on the ground shows how far it listens and players inside get a green outline.", { color = T.dim, size = 11 })
+	RangeVis.onCount = function()
+		guard(paintRange)
+	end
+	paintRange()
 
 	local ub = newCard(pg)
 	newHeader(ub, "Updates and backup")
@@ -7225,6 +8256,7 @@ end
 buildUI()
 
 G.SofiAI.World, G.SofiAI.Keys, G.SofiAI.Walk, G.SofiAI.Free = World, Keys, Walk, Free
+G.SofiAI.Reflex, G.SofiAI.RangeVis = Reflex, RangeVis
 local cleaned = false
 G.SofiAI.Cleanup = function()
 	if cleaned then
