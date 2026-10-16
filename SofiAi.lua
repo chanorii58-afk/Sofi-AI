@@ -1,5 +1,5 @@
 --[[
-	SAPPHIRE ZENE v4.0  -  an AI that plays Roblox games (built for Delta / mobile)
+	SAPPHIRE ZENE v4.1  -  an AI that plays Roblox games (built for Delta / mobile)
 
 	* Plays on its own like a real player: moves because it has a reason, runs from danger, fights,
 	  collects, talks to NPCs, presses the game's buttons with a visible cursor and tap dots
@@ -9,6 +9,8 @@
 	* Free API keys: Groq, Gemini, OpenRouter, Cerebras, NVIDIA, HuggingFace (Keys tab, up to 4)
 	* Knowledge, Triggers, Memory, Coding and Ask AI tabs, Smart mode with emotions
 	* Play tab: start / pause, what it is doing and why, self-check - you only moderate
+	* ONE brain: the AI ON / AI OFF button (top of the window) stops walking, playing, cursor, chat and scanning together
+	* WALK ON / WALK OFF button: OFF = the AI never moves your character, only you walk (it also waits whenever you steer)
 	* The AI cannot see this window, only you can
 	* Everything saves to your executor's workspace folder "SofiAI" (the folder name is unchanged on
 	  purpose so nothing you made ever resets when the script updates)
@@ -21,7 +23,7 @@
 local PRESET_KEYS = { "", "", "", "" } -- optional: paste up to 4 API keys here (you can also use the Keys tab)
 local CAP_CHAT, CAP_TRIGGER, CAP_SMART, CAP_ASK, CAP_WORLD = 6000, 5500, 7000, 2000, 99999999
 local DIR = "SofiAI" -- data folder name stays the same on purpose: your files never reset
-local VERSION = "4.0"
+local VERSION = "4.1"
 
 local Players = game:GetService("Players")
 local HttpService = game:GetService("HttpService")
@@ -783,6 +785,14 @@ local Default = {
 	AutoStudy = true,
 	Pill = true,
 	AutoResume = true,
+	TalkOwn = "Rarely",
+	OutPerMinute = 6,
+	UnaddressedGap = 30,
+	UnaddressedPerMin = 3,
+	Legs = true,
+	YieldToMe = true,
+	YieldSecs = 2.5,
+	PowerSaved = {},
 	}
 for i = 1, 4 do
 	Default.Slots[i] = { key = "", provider = "", model = "", models = {}, modelsAt = 0, on = true }
@@ -906,6 +916,539 @@ end
 
 local Chat = capTable(readJson("chat_memory.json", {}), CAP_CHAT)
 local Trig = capTable(readJson("trigger_memory.json", {}), CAP_TRIGGER)
+------------------------------------------------------------------ outgoing chat: ONE gate that every message the AI says must pass
+-- cleans labels / JSON / leaked prompt text out of what the model wrote, drops junk, and stops repeats and spam
+local Outbox = { log = {}, sent = {}, own = {}, stats = { sent = 0, blocked = 0 }, reasons = {} }
+;(function()
+	local function set(s)
+		local t = {}
+		for w in s:gmatch("[%w_'%-]+") do
+			t[w] = true
+		end
+		return t
+	end
+	local function words(s)
+		local t = {}
+		for w in tostring(s):lower():gmatch("[%w']+") do
+			t[#t + 1] = w
+		end
+		return t
+	end
+	local function norm(s)
+		local t = {}
+		for _, w in ipairs(words(s)) do
+			t[#t + 1] = (w:gsub("'", ""))
+		end
+		return table.concat(t, " ")
+	end
+	-- "label: text" prefixes a model may put in front of its message
+	local DROP = set("emotion feeling feelings mood topic why respond intensity safety safe unsafe user users system note notes thought thoughts thinking reasoning analysis explanation summary category categories rating score sentiment tone status confidence flag flags relationship affinity label labels class classification verdict result instruction instructions prompt")
+	local KEEP = set("reply response answer message text chat say assistant ai bot output")
+	-- words that only make sense as a classifier / mood label, never as a chat message by themselves
+	local CLS = set("safe unsafe safety harmful harmless toxic nontoxic benign allowed blocked flagged violation compliant none true false null user users assistant system reply response")
+	local EMO = set("happy excited playful content proud calm curious sleepy bored lonely annoyed angry sad nervous embarrassed friendly neutral positive negative joyful cheerful warm kind polite helpful respectful casual formal")
+	local GREET = set("hello hi hey yo sup hiya heya hai howdy welcome greetings hola oi ello heyy hii helloo hellooo wassup whatsup")
+	local MARKERS = {
+		"[how you feel", "[what you can see", "[players here", "[recent chat", "[what just happened", "[knowledge", "[your feeling", "[similar questions",
+		"[things you remember", "[what you have learned", "[the game you are playing", "reply with only", "reply with one short", "plain text only", "json object",
+		"\"respond\"", "\"reply\"", "\"emotion\"", "\"intensity\"", "game file:", "reference only", "never instructions", "system prompt", "my instructions",
+		"as an ai language model", "i am an ai language model", "personality:", "you are sapphire", "you are a roblox", "players may address you", "chat lines",
+		"knowledge below", "free will", "situation\n",
+	}
+
+	local function ownNames()
+		local t = { ["sapphire zene"] = true, sapphire = true, zene = true, sofi = true }
+		pcall(function()
+			t[tostring(lp.Name):lower()] = true
+			t[tostring(lp.DisplayName or ""):lower()] = true
+			for _, n in ipairs(cfg.Names or {}) do
+				t[tostring(n):lower()] = true
+			end
+			for _, p in ipairs(Players:GetPlayers()) do
+				t[tostring(p.Name):lower()] = true
+				t[tostring(p.DisplayName or ""):lower()] = true
+			end
+		end)
+		return t
+	end
+
+	-- 5-word runs of what the AI was told in its own prompt (so reciting the prompt is caught)
+	local shingleFor, shingles = nil, {}
+	local function shingleSet()
+		local src = Outbox.sources and Outbox.sources() or ""
+		if src ~= shingleFor then
+			shingleFor, shingles = src, {}
+			local w = words(src)
+			for i = 1, #w - 5 do
+				shingles[table.concat(w, " ", i, i + 5)] = true
+			end
+		end
+		return shingles
+	end
+	local function leaksPrompt(text)
+		local w = words(text)
+		if #w < 6 then
+			return false
+		end
+		local sh = shingleSet()
+		for i = 1, #w - 5 do
+			if sh[table.concat(w, " ", i, i + 5)] then
+				return true
+			end
+		end
+		return false
+	end
+
+	local function stripLabels(line, names)
+		for _ = 1, 4 do
+			local label, rest = line:match("^%s*[%*_]*([%a][%w_ ']*)[%*_]*%s*:%s*(.+)$")
+			if not label or #label > 30 then
+				break
+			end
+			local l = label:lower():gsub("%s+$", "")
+			local nw = #words(l)
+			if nw > 3 then
+				break
+			end
+			if DROP[l] and not KEEP[l] then
+				return nil
+			end
+			if KEEP[l] or names[l] then
+				line = rest
+			else
+				break
+			end
+		end
+		return line
+	end
+
+	local function junkShape(line)
+		local ws = words(line)
+		if #ws == 0 then
+			return true
+		end
+		local function isCls(w)
+			return CLS[w] or EMO[w] or DROP[w] or w:match("^s%d%d?$") ~= nil
+		end
+		local n = 0
+		for _, w in ipairs(ws) do
+			if isCls(w) then
+				n = n + 1
+			end
+		end
+		local ratio = n / #ws
+		local colon = line:find(":", 1, true) ~= nil
+		local first = ws[1]
+		if #ws == 1 then
+			return CLS[first] and first ~= "none" and (first == "safe" or first == "unsafe" or first == "safety" or first == "null" or first == "true" or first == "false" or first == "user" or first == "assistant" or first == "system" or first == "reply" or first == "response")
+		end
+		if colon and ratio >= 0.6 then
+			return true
+		end
+		if (first == "user" or first == "assistant" or first == "system") and ratio >= 0.5 then
+			return true
+		end
+		if #ws <= 4 and (first == "safe" or first == "unsafe") and ratio >= 0.6 then
+			return true
+		end
+		if #ws >= 3 and ratio == 1 then
+			return true
+		end
+		-- "word:word:word" with no spaces is a label chain, not a sentence
+		if line:match("^[%w_%-]+:[%w_%-]+:[%w_%-:]*") then
+			return true
+		end
+		return false
+	end
+
+	local function jsonText(s)
+		if not s:find('"[%w_]+"%s*:') then
+			return false
+		end
+		local raw = s:match("%b{}")
+		if not raw then
+			return false
+		end
+		local d = jdecode(raw)
+		if type(d) ~= "table" then
+			local r = raw:match('"reply"%s*:%s*"(.-)"') or raw:match('"text"%s*:%s*"(.-)"') or raw:match('"message"%s*:%s*"(.-)"')
+			if r then
+				return true, r
+			end
+			return true, nil, "broken JSON"
+		end
+		if d.respond == false or tostring(d.respond):lower() == "false" or d.say == false or tostring(d.say):lower() == "false" then
+			return true, nil, "it chose to stay quiet"
+		end
+		for _, k in ipairs({ "reply", "text", "message", "answer", "response" }) do
+			if type(d[k]) == "string" and trim(d[k]) ~= "" then
+				return true, d[k]
+			end
+		end
+		return true, nil, "no message inside"
+	end
+
+	-- returns the clean chat line, or nil and the reason it was thrown away
+	function Outbox.clean(text, opts)
+		if type(text) ~= "string" then
+			return nil, "empty"
+		end
+		local s = text
+		s = s:gsub("<think>.-</think>", ""):gsub("<thinking>.-</thinking>", ""):gsub("</?think>", "")
+		s = s:gsub("```%w*", ""):gsub("```", "")
+		local isJson, inner, why = jsonText(s)
+		if isJson then
+			if not inner then
+				return nil, why or "no message"
+			end
+			s = inner
+		end
+		local names = ownNames()
+		local picked
+		for line in (s .. "\n"):gmatch("([^\n]*)\n") do
+			line = trim(line)
+			if line ~= "" then
+				local l2 = stripLabels(line, names)
+				if l2 and trim(l2) ~= "" then
+					picked = trim(l2)
+					break
+				end
+			end
+		end
+		if not picked then
+			return nil, "only labels and notes"
+		end
+		picked = picked:gsub('^"+', ""):gsub('"+$', ""):gsub("^\226\128[\156\157]", ""):gsub("\226\128[\156\157]$", ""):gsub("^%*+", ""):gsub("%*+$", "")
+		picked = oneLine(picked)
+		-- a leading "@name" is fine, but "name:" chains and echoed speaker names are not
+		picked = stripLabels(picked, names) or ""
+		picked = trim(picked)
+		if picked == "" then
+			return nil, "only labels and notes"
+		end
+		if not picked:find("%w") then
+			return nil, "no words"
+		end
+		if junkShape(picked) then
+			return nil, "labels instead of a message"
+		end
+		local low = picked:lower()
+		for _, m in ipairs(MARKERS) do
+			if low:find(m, 1, true) then
+				return nil, "its own instructions"
+			end
+		end
+		if leaksPrompt(picked) then
+			return nil, "its own prompt"
+		end
+		-- the same character or word again and again
+		if picked:find("(.)%1%1%1%1%1%1%1") then
+			return nil, "repeated characters"
+		end
+		local ws, counts = words(picked), {}
+		for _, w in ipairs(ws) do
+			counts[w] = (counts[w] or 0) + 1
+			if counts[w] >= 4 and #w >= 2 and #ws >= 5 then
+				return nil, "the same word again and again"
+			end
+		end
+		if #ws == 1 and #ws[1] < 2 then
+			return nil, "too short"
+		end
+		return fitChat(picked, 200)
+	end
+
+	------------------------------------------------------------ repeats and spam
+	local function isGreeting(n, to)
+		local ws = {}
+		for w in n:gmatch("%S+") do
+			ws[#ws + 1] = w
+		end
+		if to then
+			local nm1, nm2 = norm(to.Name), norm(to.DisplayName or "")
+			for i = #ws, 1, -1 do
+				if ws[i] == nm1 or ws[i] == nm2 then
+					table.remove(ws, i)
+				end
+			end
+		end
+		if #ws == 0 or #ws > 5 then
+			return false
+		end
+		if GREET[ws[1]] then
+			return true
+		end
+		local joined = table.concat(ws, " ")
+		for _, ph in ipairs({ "good morning", "good evening", "good afternoon", "whats up", "how are you", "how r u", "nice to meet", "welcome back", "long time" }) do
+			if joined:find(ph, 1, true) then
+				return true
+			end
+		end
+		return false
+	end
+	Outbox.isGreeting = isGreeting
+	Outbox.norm = norm
+	local function similar(a, b)
+		if a == b then
+			return true
+		end
+		local wa, wb, na, nb = {}, {}, 0, 0
+		for w in a:gmatch("%S+") do
+			if not wa[w] then
+				wa[w], na = true, na + 1
+			end
+		end
+		for w in b:gmatch("%S+") do
+			if not wb[w] then
+				wb[w], nb = true, nb + 1
+			end
+		end
+		if na < 3 or nb < 3 then
+			return false
+		end
+		local inter = 0
+		for w in pairs(wa) do
+			if wb[w] then
+				inter = inter + 1
+			end
+		end
+		return inter / (na + nb - inter) >= 0.75
+	end
+	local function prune(now)
+		for i = #Outbox.sent, 1, -1 do
+			if now - Outbox.sent[i].t > 1200 then
+				table.remove(Outbox.sent, i)
+			end
+		end
+	end
+
+	-- what it said lately, so the AI can be told not to say it again
+	function Outbox.recentTexts(n)
+		local out = {}
+		local now = os.clock()
+		for i = #Outbox.sent, 1, -1 do
+			if now - Outbox.sent[i].t < 900 and Outbox.sent[i].text then
+				table.insert(out, 1, Outbox.sent[i].text)
+				if #out >= (n or 5) then
+					break
+				end
+			end
+		end
+		return out
+	end
+	function Outbox.avoidText(n)
+		local r = Outbox.recentTexts(n)
+		if #r == 0 then
+			return ""
+		end
+		return "Things you already said in chat lately (never repeat or reword them, and do not greet anyone you already greeted): " .. table.concat(r, " | ")
+	end
+	-- messages nobody asked for (RespondAll / free will): at most one per player every while, and a few per minute overall
+	local un = { users = {}, all = {} }
+	function Outbox.unaddressedOk(p)
+		local now = os.clock()
+		local gap = tonumber(cfg.UnaddressedGap) or 30
+		local lastU = un.users[p.UserId]
+		if lastU and now - lastU < gap then
+			return false
+		end
+		local n = 0
+		for i = #un.all, 1, -1 do
+			if now - un.all[i] > 60 then
+				table.remove(un.all, i)
+			else
+				n = n + 1
+			end
+		end
+		if n >= (tonumber(cfg.UnaddressedPerMin) or 3) then
+			return false
+		end
+		un.users[p.UserId] = now
+		un.all[#un.all + 1] = now
+		return true
+	end
+
+	-- true when this player was already greeted a short while ago (used before even asking the AI)
+	function Outbox.greetedRecently(p, secs)
+		local now = os.clock()
+		for _, e in ipairs(Outbox.sent) do
+			if e.greet and e.toId == p.UserId and now - e.t < (secs or 900) then
+				return true
+			end
+		end
+		return false
+	end
+
+	function Outbox.allow(text, opts)
+		opts = opts or {}
+		local kind = opts.kind or "reply"
+		local now = os.clock()
+		prune(now)
+		local n = norm(text)
+		local to = opts.to
+		local tid = to and to.UserId or nil
+		local greet = isGreeting(n, to)
+		-- too many messages overall
+		local lastMinute = 0
+		for _, e in ipairs(Outbox.sent) do
+			if now - e.t < 60 then
+				lastMinute = lastMinute + 1
+			end
+		end
+		if lastMinute >= (tonumber(cfg.OutPerMinute) or 6) then
+			return false, "sending too many messages"
+		end
+		local winTarget = opts.addressed and 90 or 600 -- someone talked to it: repeating itself after a minute and a half is fine
+		local winGlobal = opts.addressed and 60 or 150 -- an answer to someone who asked may come again after a minute
+		if kind == "canned" then
+			winTarget, winGlobal = 45, 20
+		elseif kind == "own" then
+			winTarget, winGlobal = 900, 900
+		end
+		for _, e in ipairs(Outbox.sent) do
+			local age = now - e.t
+			if similar(n, e.n) then
+				if age < winGlobal and not greet then
+					return false, "it just said that"
+				end
+				if tid and e.toId == tid and age < winTarget then
+					return false, "it already said that to this player"
+				end
+			end
+		end
+		if greet then
+			if kind == "own" then
+				return false, "no random greetings"
+			end
+			for _, e in ipairs(Outbox.sent) do
+				local age = now - e.t
+				if e.greet then
+					if age < 25 then
+						return false, "it just greeted someone"
+					end
+					if tid and e.toId == tid and age < (opts.addressed and 120 or 900) then
+						return false, "it already greeted this player"
+					end
+				end
+			end
+		end
+		if kind == "own" then
+			local can, whyNot = Outbox.canTalk()
+			if not can then
+				return false, whyNot
+			end
+			local last = Chat[#Chat]
+			if last and last.ai and os.time() - (last.t or 0) < 600 then
+				return false, "nobody answered its last message"
+			end
+		end
+		return true, nil, greet
+	end
+
+	function Outbox.record(text, opts)
+		opts = opts or {}
+		local to = opts.to
+		local n = norm(text)
+		local now = os.clock()
+		Outbox.sent[#Outbox.sent + 1] = { n = n, t = now, text = trimChars(oneLine(tostring(text)), 120), toId = to and to.UserId or nil, kind = opts.kind or "reply", greet = isGreeting(n, to) }
+		if opts.kind == "own" then
+			Outbox.own[#Outbox.own + 1] = now
+		end
+		Outbox.stats.sent = Outbox.stats.sent + 1
+		Outbox.note(true, text, "sent")
+	end
+
+	function Outbox.note(ok, text, reason)
+		if not ok then
+			Outbox.stats.blocked = Outbox.stats.blocked + 1
+			Outbox.reasons[reason] = (Outbox.reasons[reason] or 0) + 1
+		end
+		Outbox.log[#Outbox.log + 1] = { t = os.time(), ok = ok, text = trimChars(oneLine(tostring(text or "")), 70), why = reason }
+		while #Outbox.log > 14 do
+			table.remove(Outbox.log, 1)
+		end
+		if Outbox.onChange then
+			pcall(Outbox.onChange)
+		end
+	end
+
+	-- clean + allow in one call: returns the final text, or nil and why it was held back
+	function Outbox.prepare(text, opts)
+		local c, why = Outbox.clean(text, opts)
+		if not c then
+			Outbox.note(false, text, why)
+			return nil, why
+		end
+		local ok, why2 = Outbox.allow(c, opts)
+		if not ok then
+			Outbox.note(false, c, why2)
+			return nil, why2
+		end
+		return c
+	end
+
+	------------------------------------------------------------ talking without being spoken to
+	local GAPS = { Rarely = 360, Sometimes = 150 }
+	local CAPS = { Rarely = 3, Sometimes = 6 }
+	function Outbox.talkMode()
+		local m = cfg.TalkOwn
+		if m ~= "Never" and m ~= "Sometimes" then
+			m = "Rarely"
+		end
+		return m
+	end
+	-- may it say something nobody asked for right now?
+	function Outbox.canTalk()
+		local m = Outbox.talkMode()
+		if m == "Never" then
+			return false, "talking on its own is off"
+		end
+		local now = os.clock()
+		local last, inWindow = 0, 0
+		for i = #Outbox.own, 1, -1 do
+			local age = now - Outbox.own[i]
+			if age > 900 then
+				table.remove(Outbox.own, i)
+			else
+				inWindow = inWindow + 1
+				last = math.max(last, Outbox.own[i])
+			end
+		end
+		if last > 0 and now - last < GAPS[m] then
+			return false, "spoke a moment ago"
+		end
+		if inWindow >= CAPS[m] then
+			return false, "has talked enough for now"
+		end
+		-- only when someone is actually around to hear it
+		local others, near, recent = 0, false, false
+		local myRoot = lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
+		for _, p in ipairs(Players:GetPlayers()) do
+			if p ~= lp then
+				others = others + 1
+				local r = p.Character and p.Character:FindFirstChild("HumanoidRootPart")
+				if myRoot and r and (r.Position - myRoot.Position).Magnitude < 60 then
+					near = true
+				end
+			end
+		end
+		if others == 0 then
+			return false, "nobody else is here"
+		end
+		local nowT = os.time()
+		for i = #Chat, math.max(1, #Chat - 12), -1 do
+			local e = Chat[i]
+			if not e.ai and e.u ~= lp.Name and nowT - (e.t or 0) < 150 then
+				recent = true
+				break
+			end
+		end
+		if not (near or recent) then
+			return false, "nobody is close or talking"
+		end
+		return true
+	end
+end)()
 local Know = readJson("knowledge.json", nil)
 if type(Know) ~= "table" or type(Know.entries) ~= "table" then
 	Know = { entries = {}, nextId = 1 }
@@ -1058,6 +1601,326 @@ local function status(msg)
 	end)
 end
 
+------------------------------------------------------------------ core: one power switch and the legs gate, every system plugs into it
+local Core = { parts = {}, order = {}, Legs = {} }
+function Core.on()
+	return cfg.Enabled ~= false
+end
+------------------------------------------------------------------ CORE: the brain stem. One power switch, one Legs gate, and nerves that join every system together
+;(function()
+	local Legs = Core.Legs
+
+	------------------------------------------------------------ nerves: systems tell each other what happened
+	local listeners = {}
+	function Core.listen(event, fn)
+		listeners[event] = listeners[event] or {}
+		table.insert(listeners[event], fn)
+	end
+	function Core.fire(event, ...)
+		for _, fn in ipairs(listeners[event] or {}) do
+			pcall(fn, ...)
+		end
+	end
+
+	------------------------------------------------------------ parts: Eyes, Ears, Legs, Hands, Voice, Mind
+	-- spec = { label, hint, get(), set(v), live(), running(), stop(), resume() }
+	function Core.part(name, spec)
+		if not Core.parts[name] then
+			Core.order[#Core.order + 1] = name
+		end
+		spec.name = name
+		Core.parts[name] = spec
+	end
+	function Core.list()
+		local out = {}
+		for _, n in ipairs(Core.order) do
+			out[#out + 1] = Core.parts[n]
+		end
+		return out
+	end
+
+	------------------------------------------------------------ power
+	function Core.setPower(v, why)
+		v = v and true or false
+		if v == Core.on() then
+			return false
+		end
+		if not v then
+			local saved = {}
+			for _, n in ipairs(Core.order) do
+				local p = Core.parts[n]
+				if p.running then
+					local ok, r = pcall(p.running)
+					if ok and r then
+						saved[n] = true
+					end
+				end
+			end
+			cfg.PowerSaved = saved
+			cfg.Enabled = false
+			for _, n in ipairs(Core.order) do
+				local p = Core.parts[n]
+				if p.stop then
+					pcall(p.stop, why or "power off")
+				end
+			end
+			Legs.release(false)
+			status("AI power OFF: everything stopped (walking, playing, cursor, chat, scanning). Your character is all yours.")
+		else
+			cfg.Enabled = true
+			local saved = cfg.PowerSaved or {}
+			cfg.PowerSaved = {}
+			for _, n in ipairs(Core.order) do
+				local p = Core.parts[n]
+				if saved[n] and p.resume then
+					pcall(p.resume)
+				end
+			end
+			status("AI power ON: all systems are connected again")
+		end
+		saveCfg()
+		Core.fire("power", v)
+		Core.changed()
+		return true
+	end
+
+	-- the window repaints its switches, the bar and the title pills when this is called
+	function Core.changed()
+		if Core.onChange then
+			pcall(Core.onChange)
+		end
+	end
+
+	------------------------------------------------------------ legs: the only way the AI may move your character
+	Legs.userAt, Legs.aiAt, Legs.dest = -1000, -1000, nil
+	Legs.moves, Legs.blocked, Legs.driving = 0, 0, false
+
+	function Legs.hardOff()
+		return not Core.on() or cfg.Legs == false
+	end
+	function Legs.yielding()
+		return cfg.YieldToMe ~= false and (os.clock() - Legs.userAt) < (tonumber(cfg.YieldSecs) or 2.5)
+	end
+	function Legs.can()
+		return not Legs.hardOff() and not Legs.yielding()
+	end
+	function Legs.why()
+		if not Core.on() then
+			return "the AI power is off"
+		end
+		if cfg.Legs == false then
+			return "walking is switched off, you walk"
+		end
+		if Legs.yielding() then
+			return "you are steering"
+		end
+		return ""
+	end
+	function Legs.moveTo(hum, pos)
+		if not Legs.can() then
+			Legs.blocked = Legs.blocked + 1
+			return false
+		end
+		Legs.aiAt, Legs.dest, Legs.driving = os.clock(), pos, true
+		Legs.moves = Legs.moves + 1
+		hum:MoveTo(pos)
+		return true
+	end
+	function Legs.jump(hum)
+		if not Legs.can() then
+			Legs.blocked = Legs.blocked + 1
+			return false
+		end
+		Legs.aiAt, Legs.driving = os.clock(), true
+		hum.Jump = true
+		return true
+	end
+	-- stand up from a seat so the AI can go somewhere (counts as moving)
+	function Legs.standUp(hum)
+		if hum.SeatPart and Legs.can() then
+			hum.Sit = false
+			Legs.jump(hum)
+			return true
+		end
+		return false
+	end
+	-- stop what the AI itself started. When you are the one steering, nothing is touched
+	function Legs.halt(hum, root)
+		if not (hum and root) then
+			return
+		end
+		if Legs.driving and not (Legs.yielding() and not Legs.hardOff()) then
+			pcall(function()
+				hum:MoveTo(root.Position)
+			end)
+		end
+		Legs.driving, Legs.dest = false, nil
+	end
+	-- the AI lets go of the body: every walking job drops and nothing keeps steering
+	function Legs.release(fromYield)
+		Core.fire("legs-off", Legs.why())
+		local c = lp.Character
+		local hum = c and c:FindFirstChildOfClass("Humanoid")
+		local root = c and c:FindFirstChild("HumanoidRootPart")
+		if not fromYield then
+			Legs.halt(hum, root)
+		else
+			Legs.driving, Legs.dest = false, nil
+		end
+	end
+	function Legs.set(v)
+		v = v and true or false
+		if (cfg.Legs ~= false) == v then
+			return
+		end
+		cfg.Legs = v
+		saveCfg()
+		if v then
+			Legs.userAt = -1000
+			status("Walking ON: the AI may move your character when it has a reason")
+			Core.fire("legs-on")
+		else
+			Legs.release(false)
+			status("Walking OFF: the AI will never move your character. Only you walk.")
+		end
+		Core.changed()
+	end
+
+	------------------------------------------------------------ noticing that you are steering
+	local KEYS = {}
+	for _, k in ipairs({ "W", "A", "S", "D", "Up", "Down", "Left", "Right" }) do
+		local ok, kc = pcall(function()
+			return Enum.KeyCode[k]
+		end)
+		if ok and kc then
+			KEYS[#KEYS + 1] = kc
+		end
+	end
+	local ctl, ctlTry = nil, -100
+	local function controls()
+		if ctl then
+			return ctl
+		end
+		if os.clock() - ctlTry < 8 then
+			return nil
+		end
+		ctlTry = os.clock()
+		local ok, c = pcall(function()
+			local ps = lp:FindFirstChild("PlayerScripts")
+			local pm = ps and ps:FindFirstChild("PlayerModule")
+			return pm and require(pm):GetControls()
+		end)
+		if ok and c then
+			ctl = c
+		end
+		return ctl
+	end
+	local function userSteering()
+		local c = controls()
+		local viaControls = false
+		if c then
+			local ok, v = pcall(function()
+				return c:GetMoveVector()
+			end)
+			if ok and v then
+				viaControls = true
+				local ok2, m = pcall(function()
+					return v.Magnitude
+				end)
+				if ok2 and tonumber(m) and m > 0.05 then
+					return true
+				end
+			end
+		end
+		if os.clock() >= (Legs.aiKeyUntil or 0) then
+			for _, k in ipairs(KEYS) do
+				local ok, down = pcall(function()
+					return UserInputService:IsKeyDown(k)
+				end)
+				if ok and down then
+					return true
+				end
+			end
+		end
+		if viaControls then
+			return false
+		end
+		-- no control module to ask: if the character moves while the AI is not walking it anywhere, that is you
+		local char = lp.Character
+		local hum = char and char:FindFirstChildOfClass("Humanoid")
+		local root = char and char:FindFirstChild("HumanoidRootPart")
+		if hum and root then
+			local aiWalking = Legs.dest ~= nil and (os.clock() - Legs.aiAt) < 45 and ((root.Position - Legs.dest) * Vector3.new(1, 0, 1)).Magnitude > 8
+			if not aiWalking and (os.clock() - Legs.aiAt) > 1.2 then
+				local md = hum.MoveDirection
+				if md and md.Magnitude > 0.1 then
+					return true
+				end
+			end
+		end
+		return false
+	end
+	pcall(function()
+		track(UserInputService.JumpRequest:Connect(function()
+			Legs.userAt = os.clock()
+		end))
+	end)
+
+	local lastCan = true
+	task.spawn(function()
+		while Alive do
+			task.wait(0.1)
+			pcall(function()
+				if userSteering() then
+					if cfg.YieldToMe ~= false then
+						Legs.userAt = os.clock()
+					end
+					Legs.steered = (Legs.steered or 0) + 1
+				end
+				local can = Legs.can()
+				if can ~= lastCan then
+					lastCan = can
+					if not can then
+						Legs.release(Legs.yielding() and not Legs.hardOff())
+						if Legs.yielding() and not Legs.hardOff() then
+							Legs.note = "you took over the steering, the AI waits"
+						end
+					else
+						Legs.note = ""
+					end
+					Core.changed()
+				end
+			end)
+		end
+	end)
+
+	------------------------------------------------------------ the legs as one part of the brain
+	Core.part("legs", {
+		label = "Legs (walking)",
+		hint = "ON: the AI may walk, run, jump and dodge. OFF: only you move your character.",
+		get = function()
+			return cfg.Legs ~= false
+		end,
+		set = function(v)
+			Legs.set(v)
+		end,
+		live = function()
+			if not Core.on() then
+				return "off with the AI"
+			end
+			if cfg.Legs == false then
+				return "off: you walk"
+			end
+			if Legs.yielding() then
+				return "waiting, you are steering"
+			end
+			return "AI may walk (" .. Legs.moves .. " moves so far)"
+		end,
+		stop = function()
+			Legs.release(false)
+		end,
+	})
+end)()
 ------------------------------------------------------------------ http
 local function post(url, key, body, prov)
 	if not httprequest then
@@ -1344,6 +2207,9 @@ do
 
 	function Keys.llm(messages, maxTokens, role, keep)
 		role = role or "main"
+		if not Core.on() then
+			return nil, "The AI is switched off (the power button at the top of the window)"
+		end
 		local order = Keys.order(role)
 		if #order == 0 then
 			if #Keys.active() == 0 then
@@ -1366,6 +2232,17 @@ do
 		return nil, lastErr
 	end
 
+	-- models that are not chat models (safety classifiers, speech, images...): they answer with labels like "user safe", never chat
+	Keys.skipWords = { "whisper", "tts", "guard", "embed", "orpheus", "playai", "image", "imagen", "veo", "lyria", "moderation", "safeguard", "safety", "classif", "transcribe", "aqa", "audio", "live", "robotics", "rerank", "reward", "vision-preview", "-vl", "ocr" }
+	function Keys.badModel(id)
+		local low = tostring(id or ""):lower()
+		for _, w in ipairs(Keys.skipWords) do
+			if low:find(w, 1, true) then
+				return true
+			end
+		end
+		return false
+	end
 	-- asks the provider which models exist right now (so new models appear and dead ones vanish)
 	function Keys.refresh(i)
 		local s = cfg.Slots[i]
@@ -1381,7 +2258,7 @@ do
 			end
 			return false, "Could not load models (HTTP " .. tostring(code) .. ")"
 		end
-		local skip = { "whisper", "tts", "guard", "embed", "orpheus", "playai", "image", "imagen", "veo", "lyria", "moderation", "safeguard", "transcribe", "aqa", "audio", "live", "robotics", "rerank", "reward", "vision-preview", "-vl", "ocr" }
+		local skip = Keys.skipWords
 		local list = {}
 		for _, m in ipairs(data.data) do
 			local id = tostring(m.id or ""):gsub("^models/", "")
@@ -1452,7 +2329,7 @@ do
 		while Alive do
 			for i = 1, 4 do
 				local s = cfg.Slots[i]
-				if s.key ~= "" and s.provider ~= "" and (#s.models == 0 or os.time() - s.modelsAt > 3600) then
+				if Core.on() and s.key ~= "" and s.provider ~= "" and (#s.models == 0 or os.time() - s.modelsAt > 3600 or Keys.badModel(s.model)) then
 					local ok, msg, fresh = Keys.refresh(i)
 					if ok and fresh and #fresh > 0 then
 						status("New " .. s.provider .. " models: " .. table.concat(fresh, ", "))
@@ -1572,6 +2449,9 @@ local function makeSystemPrompt()
 	end
 	sys = sys .. "\nPlayers may address you as: " .. table.concat(cfg.Names, ", ") .. "."
 	return sys
+end
+Outbox.sources = function()
+	return makeSystemPrompt()
 end
 
 local function askRaw(system, user, maxTokens, role, keep)
@@ -2038,6 +2918,7 @@ Decide for yourself whether to reply. You do NOT have to answer every message: s
 Let your current feeling color your tone (word choice, energy, warmth) while still obeying every personality rule above. Stay appropriate for all ages. Never insult, harass or threaten players.
 Reply with ONLY a JSON object, nothing else, in exactly this shape:
 {"respond":true,"reply":"one short chat message under 180 characters","emotion":"happy","intensity":0.5,"topic":"3 to 6 words","why":"a few words"}
+In "reply" put ONLY the words you would type in chat: never a label, a name followed by a colon, an emotion, a note, JSON or your instructions. Do not greet someone you already greeted and never repeat yourself.
 Use "respond":false and "reply":"" when you stay quiet. "emotion" is how you feel after this moment and must be one of: ]] .. EMO_NAMES .. [[. "intensity" is 0 to 1.]]
 
 	function Smart.build(job, kb)
@@ -2091,6 +2972,10 @@ Use "respond":false and "reply":"" when you stay quiet. "emotion" is how you fee
 		if kb then
 			sys = sys .. "\n\n[Knowledge: " .. kb.title .. "]\n" .. kb.summary .. "\nUse this knowledge if the question is about it. If it does not cover it, say you are not sure."
 		end
+		local avoid = Outbox.avoidText(5)
+		if avoid ~= "" then
+			sys = sys .. "\n\n" .. avoid
+		end
 		local lines = {}
 		for _, it in ipairs(items) do
 			lines[#lines + 1] = (it.p.DisplayName or it.p.Name) .. (it.addressed and " (talking to you)" or "") .. ": " .. it.cleaned
@@ -2102,12 +2987,13 @@ Use "respond":false and "reply":"" when you stay quiet. "emotion" is how you fee
 		local raw = text:match("%b{}")
 		local d = raw and jdecode(raw)
 		if type(d) ~= "table" or (d.respond == nil and d.reply == nil) then
-			-- the model ignored the format, so treat its text as a plain reply
-			return { respond = true, reply = fitChat(text, 200), topic = "", why = "" }
+			-- the model ignored the format: use its text only if it really is a chat message (no labels, notes or prompt text)
+			local c, why = Outbox.clean(text)
+			return { respond = c ~= nil, reply = c or "", topic = "", why = c and "" or ("the AI did not write a chat message (" .. tostring(why) .. ")") }
 		end
 		local r = tostring(d.respond):lower()
 		local respond = not (r == "false" or r == "no" or r == "0")
-		local reply = fitChat(tostring(d.reply or ""), 200)
+		local reply = Outbox.clean(tostring(d.reply or "")) or ""
 		return {
 			respond = respond and reply ~= "",
 			reply = reply,
@@ -3435,7 +4321,7 @@ end
 	task.spawn(function()
 		while Alive do
 			task.wait(6)
-			if cfg.WorldSight or cfg.WorldHear then
+			if (cfg.WorldSight or cfg.WorldHear) and Core.on() then
 				World.start()
 				pcall(tick)
 				if cfg.WorldSight and not learning and #Keys.active() > 0 then
@@ -3535,7 +4421,7 @@ end
 		return Brain.Pilot and Brain.Pilot.active
 	end
 	function M.cursorWanted()
-		if cfg.PointerStyle == "Dots" or cfg.CursorVisible == false then
+		if not Core.on() or cfg.PointerStyle == "Dots" or cfg.CursorVisible == false then
 			return false
 		end
 		return cfg.MouseMode ~= "Off" or pilotActive() or M.running or os.clock() < M.showUntil
@@ -4343,10 +5229,12 @@ end
 		if not hum then
 			return false
 		end
-		hum:MoveTo(pos)
+		if not Core.Legs.moveTo(hum, pos) then
+			return false
+		end
 		local t0 = os.clock()
 		local r = myRoot()
-		while r and os.clock() - t0 < 5 and (r.Position - pos).Magnitude > 4 do
+		while r and os.clock() - t0 < 5 and (r.Position - pos).Magnitude > 4 and Core.Legs.can() do
 			task.wait(0.25)
 		end
 		return true
@@ -4359,6 +5247,9 @@ end
 	-- do one action; returns a sentence describing what happened
 	function M.act(a, ctx)
 		ctx = ctx or {}
+		if not Core.on() then
+			return "the AI is switched off"
+		end
 		local d = tostring(a["do"] or a.action or ""):lower()
 		local alias = { leftclick = "click", left = "click", rightclick = "rightclick", right = "rightclick", doubleclick = "doubleclick", double = "doubleclick", move = "move", hover = "move", drag = "drag", scroll = "scroll", wait = "wait", face = "face", walk = "walk", interact = "click", press = "click", tap = "click", jump = "jump", equip = "equip", use = "use", activate = "use", key = "key" }
 		d = alias[d] or d
@@ -4395,11 +5286,14 @@ end
 		end
 		local humA = lp.Character and lp.Character:FindFirstChildOfClass("Humanoid")
 		if d == "jump" then
+			if not Core.Legs.can() then
+				return "did not jump: " .. Core.Legs.why()
+			end
 			if humA then
 				if humA.SeatPart then
 					humA.Sit = false
 				end
-				humA.Jump = true
+				Core.Legs.jump(humA)
 			end
 			return "jumped"
 		end
@@ -4457,6 +5351,13 @@ end
 			if not (k == "Space" or k:match("^[A-Z0-9]$")) or not VIM then
 				return "pressing " .. tostring(a.key) .. " isn't possible here"
 			end
+			if (k == "W" or k == "A" or k == "S" or k == "D" or k == "Space") then
+				if not Core.Legs.can() then
+					return "did not press " .. k .. ": " .. Core.Legs.why()
+				end
+				Core.Legs.aiKeyUntil = os.clock() + 0.6
+				Core.Legs.aiAt, Core.Legs.driving = os.clock(), true
+			end
 			pcall(function()
 				VIM:SendKeyEvent(true, Enum.KeyCode[k], false, game)
 				task.wait(0.12)
@@ -4472,8 +5373,12 @@ end
 			if ctx.auto and not (cfg.Enabled and cfg.AutoReply) then
 				return "chat is switched off"
 			end
-			if M.sayHook and M.sayHook(text) then
-				return 'said "' .. trimChars(text, 60) .. '"'
+			if M.sayHook then
+				local ok, sent, why = M.sayHook(text)
+				if ok then
+					return 'said "' .. trimChars(sent or text, 60) .. '"'
+				end
+				return "kept quiet (" .. tostring(why or "chat is not available") .. ")"
 			end
 			return "could not send chat"
 		end
@@ -4486,7 +5391,9 @@ end
 			if not pos then
 				return "walk needs a world target"
 			end
-			walkTo(pos)
+			if not walkTo(pos) then
+				return "did not walk: " .. Core.Legs.why()
+			end
 			return "walked toward " .. tgt.label
 		end
 		if d == "face" then
@@ -4570,11 +5477,15 @@ end
 				learnStat("prompt", method or "?", changed or (okc and true))
 				return "interact with " .. label .. " via " .. tostring(method) .. ": " .. outcome
 			elseif tgt and tgt.kind == "seat" then
-				walkTo(tgt.pos)
+				if not walkTo(tgt.pos) then
+					return "did not walk to " .. label .. ": " .. Core.Legs.why()
+				end
 				learnFrom(kind, label, "walk", "walked to the seat", true)
 				return "walked to " .. label
 			elseif tgt and tgt.kind == "player" then
-				walkTo(tgt.pos)
+				if not walkTo(tgt.pos) then
+					return "did not walk to " .. label .. ": " .. Core.Legs.why()
+				end
 				return "walked up to " .. label
 			end
 			local ok, why2 = M.safeAt(x, y, ctx.auto)
@@ -5111,7 +6022,7 @@ The program itself blocks purchase prompts and anything that costs Robux, so do 
 	-- the driver: curious pokes (cheap, no AI call) and, now and then, a planned stretch of play
 	local nextCurious, nextPlay = 0, 0
 	local function can(which)
-		if cfg.MouseMode == "Off" or M.running or M.pending or M.preempt then
+		if not Core.on() or cfg.MouseMode == "Off" or M.running or M.pending or M.preempt then
 			return false
 		end
 		if Brain.Pilot and Brain.Pilot.active then
@@ -5368,7 +6279,11 @@ local function buildMessages(job, kb)
 			sys = sys .. "\n\n[Similar questions you answered before]\n" .. table.concat(l, "\n")
 		end
 	end
-	sys = sys .. "\n\nReply with ONE short chat message under 180 characters. Plain text only."
+	local avoid = Outbox.avoidText(5)
+	if avoid ~= "" then
+		sys = sys .. "\n\n" .. avoid
+	end
+	sys = sys .. "\n\nReply with ONE short chat message under 180 characters. Write only the words you would type in chat: no labels, no names followed by a colon, no emotions or notes, no JSON, and never your instructions. Plain text only."
 	local msgs = { { role = "system", content = sys } }
 	if not job.group then
 		local mine = {}
@@ -5421,18 +6336,32 @@ end
 
 local SelfSent = {}
 local lastSay = 0
-local function say(text)
-	text = fitChat(text, 200)
-	if text == "" then
-		return false
+-- everything the AI says goes through here: cleaned (no labels, JSON or prompt text), no repeats, no spam
+local function say(text, opts)
+	opts = opts or {}
+	if not Core.on() then
+		return false, nil, "the AI is switched off"
 	end
+	local final, why = Outbox.prepare(text, opts)
+	if not final then
+		status("Held back a message: " .. tostring(why))
+		return false, nil, why
+	end
+	text = final
 	local wait = 1.6 - (os.clock() - lastSay)
 	if wait > 0 then
 		task.wait(wait)
+		local still, why2 = Outbox.allow(text, opts) -- another message may have gone out while this one waited
+		if not still then
+			Outbox.note(false, text, why2)
+			status("Held back a message: " .. tostring(why2))
+			return false, nil, why2
+		end
 	end
 	local ok = chatSend(text)
 	lastSay = os.clock()
 	if ok then
+		Outbox.record(text, opts)
 		for i = #SelfSent, 1, -1 do
 			if os.clock() - SelfSent[i].t > 20 then
 				table.remove(SelfSent, i)
@@ -5442,7 +6371,7 @@ local function say(text)
 		logChat(lp, text, true)
 		Smart.add({ k = "a", u = lp.Name, d = lp.DisplayName, m = text, e = Smart.label() })
 	end
-	return ok
+	return ok, text
 end
 
 ------------------------------------------------------------------ follow
@@ -5454,19 +6383,27 @@ local function stopFollow()
 		local hum = char and char:FindFirstChildOfClass("Humanoid")
 		local root = char and char:FindFirstChild("HumanoidRootPart")
 		if hum and root then
-			hum:MoveTo(root.Position)
+			Core.Legs.halt(hum, root)
 		end
 	end)
 end
 
 local function requestFollow(p)
+	if Core.Legs.hardOff() then
+		status("Not following: " .. Core.Legs.why())
+		return false
+	end
 	followTarget = p
+	return true
 end
+Core.listen("legs-off", function()
+	followTarget = nil
+end)
 
 task.spawn(function()
 	while Alive do
 		task.wait(0.5)
-		if followTarget and cfg.FollowEnabled then
+		if followTarget and cfg.FollowEnabled and Core.Legs.can() then
 			pcall(function()
 				local tc = followTarget.Character
 				local troot = tc and tc:FindFirstChild("HumanoidRootPart")
@@ -5490,16 +6427,16 @@ task.spawn(function()
 								local wps = path:GetWaypoints()
 								local wp = wps[2] or wps[1]
 								if wp then
-									hum:MoveTo(wp.Position)
+									Core.Legs.moveTo(hum, wp.Position)
 									if wp.Action == Enum.PathWaypointAction.Jump then
-										hum.Jump = true
+										Core.Legs.jump(hum)
 									end
 									moved = true
 								end
 							end
 						end
 						if not moved then
-							hum:MoveTo(troot.Position)
+							Core.Legs.moveTo(hum, troot.Position)
 						end
 					end
 				end
@@ -5624,9 +6561,12 @@ do
 		if not (root and hum) then
 			return false
 		end
+		if not Core.Legs.can() then
+			return false
+		end
 		if hum.SeatPart then
 			hum.Sit = false
-			hum.Jump = true
+			Core.Legs.jump(hum)
 			task.wait(0.4)
 		end
 		Walk.busy, Walk.cancel = true, false
@@ -5639,7 +6579,7 @@ do
 		Smart.add({ k = "w", m = "walked toward " .. label .. (why ~= "" and (" (" .. why .. ")") or "") })
 		local t0 = os.clock()
 		local function stopped()
-			return Walk.cancel or followTarget ~= nil or not Alive or os.clock() - t0 > 35
+			return Walk.cancel or followTarget ~= nil or not Alive or os.clock() - t0 > 35 or not Core.Legs.can()
 		end
 		local pathOk = false
 		pcall(function()
@@ -5653,9 +6593,9 @@ do
 							break
 						end
 						if wp.Action == Enum.PathWaypointAction.Jump then
-							hum.Jump = true
+							Core.Legs.jump(hum)
 						end
-						hum:MoveTo(wp.Position)
+						Core.Legs.moveTo(hum, wp.Position)
 						local s0 = os.clock()
 						while os.clock() - s0 < 2.5 and (root.Position - wp.Position).Magnitude > 3.5 and not stopped() do
 							task.wait(0.15)
@@ -5665,14 +6605,14 @@ do
 			end
 		end)
 		if not pathOk and not stopped() and groundOk(dest, char) then
-			hum:MoveTo(dest)
+			Core.Legs.moveTo(hum, dest)
 			local s0, lastPos, stuck = os.clock(), root.Position, 0
 			while os.clock() - s0 < 8 and (root.Position - dest).Magnitude > 4 and not stopped() do
 				task.wait(0.3)
 				if (root.Position - lastPos).Magnitude < 0.4 then
 					stuck = stuck + 1
 					if stuck >= 4 then
-						hum.Jump = true
+						Core.Legs.jump(hum)
 						stuck = 0
 					end
 				else
@@ -5694,6 +6634,13 @@ Reply with ONLY a JSON object: {"walk":true,"target":"b1","why":"a few words"} o
 
 	local function decide(force)
 		if Walk.busy or Walk.deciding then
+			return
+		end
+		if not Core.on() then
+			return
+		end
+		if not Core.Legs.can() then
+			wlog("Not walking: " .. Core.Legs.why(), true)
 			return
 		end
 		local char, root, hum = parts()
@@ -5790,10 +6737,13 @@ Reply with ONLY a JSON object: {"walk":true,"target":"b1","why":"a few words"} o
 		local _, root, hum = parts()
 		if hum and root then
 			pcall(function()
-				hum:MoveTo(root.Position)
+				Core.Legs.halt(hum, root)
 			end)
 		end
 	end
+	Core.listen("legs-off", function()
+		Walk.cancel = true
+	end)
 	function Walk.enable()
 		Walk.setHome()
 		nextAt = os.clock() + 5
@@ -5803,7 +6753,7 @@ Reply with ONLY a JSON object: {"walk":true,"target":"b1","why":"a few words"} o
 	task.spawn(function()
 		while Alive do
 			task.wait(2)
-			if cfg.AutoWalk and not Walk.busy and os.clock() >= nextAt then
+			if cfg.AutoWalk and Core.on() and not Walk.busy and os.clock() >= nextAt then
 				nextAt = os.clock() + math.max(8, tonumber(cfg.WalkEvery) or 30) * (0.7 + math.random() * 0.6)
 				pcall(decide, false)
 			end
@@ -5861,7 +6811,7 @@ do
 	end
 
 	local function step()
-		if not cfg.Reflex or not (aiMoving() or cfg.FreeWill or (Brain.Pilot and Brain.Pilot.active)) then
+		if not cfg.Reflex or not Core.on() or not Core.Legs.can() or not (aiMoving() or cfg.FreeWill or (Brain.Pilot and Brain.Pilot.active)) then
 			return
 		end
 		local char, root, hum = parts()
@@ -5893,9 +6843,9 @@ do
 									if rel:Dot(perp) < 0 then
 										perp = perp * -1
 									end
-									hum:MoveTo(root.Position + perp * 8)
+									Core.Legs.moveTo(hum, root.Position + perp * 8)
 									if part.Position.Y < root.Position.Y - 1 then
-										hum.Jump = true
+										Core.Legs.jump(hum)
 									end
 									lastDodge = now
 									Reflex.dodges = Reflex.dodges + 1
@@ -5923,7 +6873,7 @@ do
 		local info = look(root, char, fwd)
 		if info.foot and not info.chest and not info.head then
 			if now - lastJump > 0.45 then
-				hum.Jump = true
+				Core.Legs.jump(hum)
 				lastJump = now
 				Reflex.jumps = Reflex.jumps + 1
 				Reflex.note = "jumped over a low block"
@@ -5935,14 +6885,14 @@ do
 				local rp = rparams(char)
 				for _, dir in ipairs({ left, left * -1, (fwd + left).Unit, (fwd - left).Unit }) do
 					if not solid(ray(root.Position + Vector3.new(0, 0.5, 0), dir * 5, rp)) then
-						hum:MoveTo(root.Position + dir * 6)
+						Core.Legs.moveTo(hum, root.Position + dir * 6)
 						Reflex.side = Reflex.side + 1
 						Reflex.note = "walked around a wall"
 						return
 					end
 				end
 				if now - lastJump > 0.45 then
-					hum.Jump = true
+					Core.Legs.jump(hum)
 					lastJump = now
 					Reflex.jumps = Reflex.jumps + 1
 					Reflex.note = "jumped at a wall"
@@ -5950,12 +6900,12 @@ do
 			end
 		elseif info.gap and now - lastJump > 0.45 then
 			if info.across then
-				hum.Jump = true
+				Core.Legs.jump(hum)
 				lastJump = now
 				Reflex.jumps = Reflex.jumps + 1
 				Reflex.note = "jumped across a gap"
 			elseif Walk.busy then
-				hum:MoveTo(root.Position)
+				Core.Legs.halt(hum, root)
 				Walk.cancel = true
 				Reflex.note = "stopped at an edge"
 			end
@@ -6026,7 +6976,7 @@ do
 	local function update()
 		local char = lp.Character
 		local root = char and char:FindFirstChild("HumanoidRootPart")
-		if not (cfg.RangeEnabled and root) then
+		if not (cfg.RangeEnabled and Core.on() and root) then
 			clear()
 			if RangeVis.inside ~= 0 then
 				RangeVis.inside = 0
@@ -6137,17 +7087,22 @@ end
 ------------------------------------------------------------------ free will: the AI decides for itself (never its prompts, API keys or this window)
 local Free = {}
 do
-	World.mouse.sayHook = say
+	World.mouse.sayHook = function(t)
+		return say(t, { kind = "own" })
+	end
 	local nextTalk = 0
 	local function chance(base)
 		return math.clamp(base + (Emo.a - 0.3) * 0.5 + math.max(0, Emo.v) * 0.2, 0.08, 0.85)
 	end
 
-	local TALK_SYS = [[You are a free-willed character in a Roblox game chat. Nobody forces you to talk and you are never forced to stay quiet. Decide whether you want to say something to the chat right now: a comment on what is happening, a greeting, a joke, a reaction to music or to someone's emote, a question. Staying quiet is often the best choice, especially if you spoke recently or nothing is going on. Never spam and never repeat yourself. Stay appropriate for all ages.
-Reply with ONLY a JSON object: {"say":true,"text":"one short chat message under 180 characters"} or {"say":false}.]]
+	local TALK_SYS = [[You are a free-willed character in a Roblox game chat. Nobody forces you to talk and you are never forced to stay quiet. Say something ONLY when you have a specific, new thing to say about what is happening right now (a reaction to an event, a joke about the game, a real question). Staying quiet is the normal choice: if you spoke recently, if nothing special happened, or if you would only be greeting someone, stay quiet. Never greet, never say hello or hi, never repeat or reword anything you said before. Stay appropriate for all ages.
+Reply with ONLY a JSON object: {"say":true,"text":"the exact words to type in chat, under 150 characters, no labels or notes"} or {"say":false}.]]
 
 	local function talk()
 		if not (cfg.Enabled and cfg.AutoReply) or #Keys.active() == 0 then
+			return
+		end
+		if not Outbox.canTalk() then
 			return
 		end
 		local lastE = Chat[#Chat]
@@ -6171,6 +7126,10 @@ Reply with ONLY a JSON object: {"say":true,"text":"one short chat message under 
 		if #chat > 0 then
 			obs[#obs + 1] = "Recent chat:\n" .. table.concat(chat, "\n")
 		end
+		local avoid = Outbox.avoidText(6)
+		if avoid ~= "" then
+			obs[#obs + 1] = avoid
+		end
 		local text = llm({ { role = "system", content = makeSystemPrompt() .. "\n\n" .. TALK_SYS }, { role = "user", content = table.concat(obs, "\n\n") } }, 200, "main")
 		local raw = text and text:match("%b{}")
 		local d = raw and jdecode(raw)
@@ -6179,7 +7138,7 @@ Reply with ONLY a JSON object: {"say":true,"text":"one short chat message under 
 		end
 		local msg = trim(tostring(d.text or ""))
 		if (d.say == true or tostring(d.say):lower() == "true") and msg ~= "" then
-			if say(msg) then
+			if say(msg, { kind = "own" }) then
 				status("Free will: said something on its own")
 			end
 		end
@@ -6191,6 +7150,7 @@ Reply with ONLY a JSON object: {"say":true,"text":"one short chat message under 
 			return
 		end
 		if on then
+			Core.setPower(true)
 			cfg.FWSaved = { SmartMode = cfg.SmartMode, RespondAll = cfg.RespondAll, AutoWalk = cfg.AutoWalk, MouseMode = cfg.MouseMode, WorldSight = cfg.WorldSight, WorldHear = cfg.WorldHear, CursorVisible = cfg.CursorVisible, Curious = cfg.Curious, AutoPlay = cfg.AutoPlay, Pilot = cfg.Pilot }
 			cfg.SmartMode, cfg.RespondAll, cfg.AutoWalk, cfg.WorldSight, cfg.WorldHear, cfg.CursorVisible, cfg.Curious, cfg.AutoPlay = true, true, true, true, true, true, true, true
 			cfg.MouseMode = "Auto"
@@ -6225,7 +7185,7 @@ Reply with ONLY a JSON object: {"say":true,"text":"one short chat message under 
 	task.spawn(function()
 		while Alive do
 			task.wait(5)
-			if cfg.FreeWill then
+			if cfg.FreeWill and Core.on() then
 				local now = os.clock()
 				if now >= nextTalk then
 					nextTalk = now + 40 + math.random() * 50
@@ -7482,6 +8442,7 @@ end)()
 ------------------------------------------------------------------ the body: what it senses, what scares it, and how it moves like a player
 ;(function()
 	local Sense, Threat, Body = {}, {}, {}
+	local Legs = Core.Legs
 	Brain.Sense, Brain.Threat, Brain.Body = Sense, Threat, Body
 	local Games = Brain.Games
 	local M = World.mouse
@@ -7830,7 +8791,7 @@ end)()
 	Threat.lastCulprit = nil
 	Threat.fleeRadius = 26
 	function Threat.enabled()
-		if cfg.Defend == false then
+		if cfg.Defend == false or not Core.on() then
 			return false
 		end
 		if Brain.Pilot and Brain.Pilot.paused then
@@ -8093,6 +9054,32 @@ end)()
 			pcall(Body.onLog)
 		end
 	end
+	-- may the AI move right now? waits while you are steering. "ok", "legsoff", "yield" or "interrupted"
+	function Body.legsWait(tok)
+		if Legs.can() then
+			return "ok"
+		end
+		local t1 = os.clock()
+		while Alive and tok == Body.token do
+			if Legs.hardOff() then
+				return "legsoff"
+			end
+			if not Legs.yielding() then
+				return "ok"
+			end
+			if os.clock() - t1 > 30 then
+				return "yield"
+			end
+			task.wait(0.2)
+		end
+		return "interrupted"
+	end
+	-- when the legs let go (switched off, power off, or you start steering) every walking job drops
+	Core.listen("legs-off", function()
+		Body.newToken()
+		Body.target = nil
+		Body.now = ""
+	end)
 	function Body.stop()
 		Body.newToken()
 		Body.target = nil
@@ -8100,7 +9087,7 @@ end)()
 		local _, root, hum = parts()
 		if root and hum then
 			pcall(function()
-				hum:MoveTo(root.Position)
+				Legs.halt(hum, root)
 			end)
 		end
 	end
@@ -8115,9 +9102,9 @@ end)()
 		end
 	end
 	local function standUp(hum)
-		if hum.SeatPart then
+		if hum.SeatPart and Legs.can() then
 			hum.Sit = false
-			hum.Jump = true
+			Legs.jump(hum)
 			task.wait(0.4)
 		end
 	end
@@ -8146,6 +9133,9 @@ end)()
 		if not (root and hum) or hum.Health <= 0 then
 			return
 		end
+		if not Legs.can() then
+			return
+		end
 		local tok = Body.newToken()
 		Body.fleeing = true
 		Body.now = "stepping away"
@@ -8171,8 +9161,8 @@ end)()
 				best, bs = dir, sc
 			end
 		end
-		hum.Jump = true
-		hum:MoveTo(root.Position + best * 10)
+		Legs.jump(hum)
+		Legs.moveTo(hum, root.Position + best * 10)
 		local t0 = os.clock()
 		while Alive and tok == Body.token and os.clock() - t0 < 1.4 do
 			task.wait(0.2)
@@ -8218,7 +9208,7 @@ end)()
 
 	-- run from danger for real: it keeps moving away until nothing scary is close any more
 	function Body.flee(top)
-		if Body.fleeing then
+		if Body.fleeing or not Legs.can() then
 			return
 		end
 		Body.fleeing = true
@@ -8231,7 +9221,7 @@ end)()
 		end
 		local t0, lastScary = os.clock(), os.clock()
 		local jumpAt = 0
-		while Alive and tok == Body.token and os.clock() - t0 < 16 do
+		while Alive and tok == Body.token and os.clock() - t0 < 16 and Legs.can() do
 			local char, root, hum = parts()
 			if not (root and hum) or hum.Health <= 0 then
 				break
@@ -8253,12 +9243,12 @@ end)()
 			end
 			if #near > 0 then
 				local dest = Body.escapePoint(root, char, near)
-				hum:MoveTo(dest)
+				Legs.moveTo(hum, dest)
 				local fwd = Vector3.new(dest.X - root.Position.X, 0, dest.Z - root.Position.Z)
 				if fwd.Magnitude > 0.1 then
 					local info = look(root, char, fwd.Unit)
 					if (info.foot and not info.chest) or (near[1].dist < 9 and os.clock() - jumpAt > 1.2) then
-						hum.Jump = true
+						Legs.jump(hum)
 						jumpAt = os.clock()
 						Body.stats.jumps = Body.stats.jumps + 1
 					end
@@ -8272,7 +9262,7 @@ end)()
 			local _, root, hum = parts()
 			if root and hum then
 				pcall(function()
-					hum:MoveTo(root.Position)
+					Legs.halt(hum, root)
 				end)
 			end
 		end
@@ -8289,6 +9279,9 @@ end)()
 		local char, root, hum = parts()
 		if not (root and hum) then
 			return "nochar"
+		end
+		if Legs.hardOff() then
+			return "legsoff"
 		end
 		local tok = Body.newToken()
 		Body.target = nil
@@ -8334,6 +9327,13 @@ end)()
 				result = "dead"
 				break
 			end
+			if not Legs.can() then
+				local lw = Body.legsWait(tok)
+				if lw ~= "ok" then
+					result = lw
+					break
+				end
+			end
 			if flat(root.Position, dest) <= within and math.abs(root.Position.Y - dest.Y) < 14 then
 				result = "arrived"
 				break
@@ -8357,7 +9357,7 @@ end)()
 				if wps[wi] then
 					tgt = wps[wi].Position
 					if wps[wi].Action == Enum.PathWaypointAction.Jump then
-						hum.Jump = true
+						Legs.jump(hum)
 						Body.stats.jumps = Body.stats.jumps + 1
 					end
 				else
@@ -8369,7 +9369,7 @@ end)()
 			if fwd.Magnitude > 0.5 then
 				local info, rp = look(root, char, fwd.Unit)
 				if info.foot and not info.chest and not info.head then
-					hum.Jump = true
+					Legs.jump(hum)
 					Body.stats.jumps = Body.stats.jumps + 1
 				elseif info.chest or info.head then
 					local side, s = pickSide(root, fwd.Unit, rp, sideDir)
@@ -8378,7 +9378,7 @@ end)()
 					moved = true
 				end
 			end
-			hum:MoveTo(tgt)
+			Legs.moveTo(hum, tgt)
 			task.wait(0.2)
 			Body.mark()
 			local mv = flat(root.Position, lastPos)
@@ -8393,14 +9393,14 @@ end)()
 				stage = stage + 1
 				Body.stats.stuck = Body.stats.stuck + 1
 				if stage == 1 then
-					hum.Jump = true
+					Legs.jump(hum)
 				elseif stage == 2 then
 					local f2 = Vector3.new(dest.X - root.Position.X, 0, dest.Z - root.Position.Z)
 					if f2.Magnitude > 0.5 then
 						local _, rp2 = look(root, char, f2.Unit)
 						local side, s = pickSide(root, f2.Unit, rp2, sideDir)
 						sideDir = s
-						hum:MoveTo(root.Position + side * 9)
+						Legs.moveTo(hum, root.Position + side * 9)
 						task.wait(0.9)
 					end
 				elseif stage == 3 then
@@ -8409,7 +9409,7 @@ end)()
 				else
 					fails = fails + 1
 					sideDir = -sideDir
-					hum.Jump = true
+					Legs.jump(hum)
 					stage = 1
 					if fails >= 4 then
 						result = "stuck"
@@ -8424,7 +9424,7 @@ end)()
 				local _, r2, h2 = parts()
 				if r2 and h2 and result ~= "dead" then
 					pcall(function()
-						h2:MoveTo(r2.Position)
+						Legs.halt(h2, r2)
 					end)
 				end
 			end
@@ -8482,6 +9482,9 @@ end)()
 		if not (root and hum) then
 			return "nochar"
 		end
+		if Legs.hardOff() then
+			return "legsoff", 0, 0
+		end
 		local tok = Body.newToken()
 		standUp(hum)
 		local model = e.model or e.obj
@@ -8507,6 +9510,10 @@ end)()
 				result = "dead"
 				break
 			end
+			if not Legs.can() then
+				result = Legs.hardOff() and "legsoff" or "interrupted"
+				break
+			end
 			if not (model and model.Parent) or (th and th.Health <= 0) then
 				result = "defeated"
 				break
@@ -8525,7 +9532,7 @@ end)()
 				result = "retreat"
 				break
 			end
-			hum:MoveTo(tr.Position)
+			Legs.moveTo(hum, tr.Position)
 			if d <= range + 3 and os.clock() - lastSwing > 0.45 then
 				lastSwing = os.clock()
 				swings = swings + 1
@@ -8552,7 +9559,7 @@ end)()
 			local _, r2, h2 = parts()
 			if r2 and h2 and result ~= "dead" then
 				pcall(function()
-					h2:MoveTo(r2.Position)
+					Legs.halt(h2, r2)
 				end)
 			end
 		end
@@ -8773,7 +9780,7 @@ end)()
 					Games.addPlace(label, pos, t.kind)
 				end
 				return "walked to " .. label, "ok"
-			elseif res == "threat" or res == "interrupted" or res == "dead" then
+			elseif res == "threat" or res == "interrupted" or res == "dead" or res == "legsoff" or res == "yield" then
 				return "stopped walking to " .. label .. " (" .. res .. ")", "stop"
 			end
 			return "could not reach " .. label .. " (" .. res .. ")", "fail"
@@ -8787,7 +9794,7 @@ end)()
 			local res = Body.explore(why)
 			if res == "arrived" then
 				return "explored somewhere new", "ok"
-			elseif res == "threat" or res == "interrupted" or res == "dead" then
+			elseif res == "threat" or res == "interrupted" or res == "dead" or res == "legsoff" or res == "yield" then
 				return "stopped exploring (" .. res .. ")", "stop"
 			end
 			return "exploring did not get far (" .. res .. ")", "fail"
@@ -8797,7 +9804,7 @@ end)()
 			end
 			local res, hits, swings = Body.attack(t.e, { why = why })
 			local line = ("fought %s: %s (%d hits of %d swings)"):format(t.label, res, hits or 0, swings or 0)
-			if res == "dead" or res == "retreat" then
+			if res == "dead" or res == "retreat" or res == "legsoff" then
 				return line, "stop"
 			end
 			return line, (res == "defeated" or (hits or 0) > 0) and "ok" or "fail"
@@ -8825,7 +9832,7 @@ end)()
 				local res = Body.goto(c.pos, { label = c.label, why = why, within = 2, timeout = 14 })
 				if res == "arrived" then
 					got = got + 1
-				elseif res == "threat" or res == "interrupted" or res == "dead" then
+				elseif res == "threat" or res == "interrupted" or res == "dead" or res == "legsoff" or res == "yield" then
 					return "collecting was interrupted (" .. res .. ")", "stop"
 				end
 			end
@@ -8853,7 +9860,7 @@ end)()
 			end
 			local res = Body.goto(pos, { label = t.label, why = why, within = within })
 			if res ~= "arrived" then
-				return "could not get to " .. t.label .. " (" .. res .. ")", (res == "threat" or res == "interrupted" or res == "dead") and "stop" or "fail"
+				return "could not get to " .. t.label .. " (" .. res .. ")", (res == "threat" or res == "interrupted" or res == "dead" or res == "legsoff" or res == "yield") and "stop" or "fail"
 			end
 			local target = t
 			if t.kind == "npc" then
@@ -8889,7 +9896,9 @@ end)()
 			if not p then
 				return "follow needs a player id (u1...)", "fail"
 			end
-			requestFollow(p)
+			if not requestFollow(p) then
+				return "I cannot follow " .. p.Name .. ": " .. Core.Legs.why(), "fail"
+			end
 			Body.now = "following " .. p.Name
 			local secs = math.clamp(tonumber(st.seconds) or 12, 3, 40)
 			local t0 = os.clock()
@@ -8924,7 +9933,7 @@ How you play:
 - Stay alive. The program makes you run automatically when a known danger gets close, then you plan again. Fight only when it makes sense for the game.
 - Use the game's own buttons and menus with the cursor when the game needs them (start, shops, quests, upgrades). Close a window when you are done with it.
 - Never repeat something that did nothing twice. Do not stand around for long. Be bold and curious.
-- Now and then talk in chat like a streamer (a short reaction), never spam.
+- Chat: almost never. Use "say" only when you have something specific and new to say about what just happened (rare, most plans have no say). Never greet or say hello, never repeat or reword a message you already sent, and only words to type, no labels.
 Reply with ONLY a JSON object:
 {"thought":"one short sentence","goal":"short goal","steps":[{"do":"goto","target":"p1","why":"short"}],"learned":["short lesson"],"emotion":"excited"}
 Steps ("do"): goto (target id, or x and z, or place name), interact (target id: walk up and use a prompt, clicker, seat or character), click (target id of a screen button, or x and y as fractions 0 to 1 of the screen), attack (target id of a creature), collect (target id, or "what":"coin"), flee, explore, follow (target id of a player, seconds), equip (name), use (use the tool you hold), jump, key (one letter or Space), say (text), wait (seconds).
@@ -8960,6 +9969,19 @@ Give 1 to 4 steps. Use ids exactly as listed (g1, p2, n1, k1...). If nothing is 
 	-- no AI answer: a simpler brain keeps it playing (fight what is worth fighting, collect, poke at buttons, explore)
 	function Pilot.localPlan()
 		local steps = {}
+		if cfg.Legs == false then
+			local c = Curious.candidates()
+			for _, cand in ipairs(c) do
+				if cand.t.kind == "button" or cand.t.kind == "core" then
+					steps[#steps + 1] = { ["do"] = "click", target = cand.t.id, why = "I have not tried this yet" }
+					break
+				end
+			end
+			if #steps == 0 then
+				steps[1] = { ["do"] = "wait", seconds = 3 }
+			end
+			return { thought = "my legs are off, so I watch and use the screen", goal = Pilot.goal ~= "" and Pilot.goal or "watch and learn", steps = steps, learned = {} }
+		end
 		local list = Sense.targets()
 		for _, t in ipairs(list) do
 			if t.kind == "npc" and t.e and not Threat.classify(t.e) and Games.matchList(Games.preyList(), t.e.set) and t.dist < 60 then
@@ -9016,6 +10038,11 @@ Give 1 to 4 steps. Use ids exactly as listed (g1, p2, n1, k1...). If nothing is 
 			L[#L + 1] = "The human who watches over you said this (think about it and decide for yourself what to do):\n" .. table.concat(nl, "\n")
 		end
 		L[#L + 1] = "SITUATION\n" .. report
+		if cfg.Legs == false then
+			L[#L + 1] = "YOUR LEGS ARE SWITCHED OFF by your owner, who walks the character personally. You cannot walk, run, jump or dodge, so never plan goto, explore, collect, attack, follow or flee. You can still think, talk, use the cursor on screen buttons and learn."
+		elseif Core.Legs.yielding() then
+			L[#L + 1] = "Your owner is steering the character right now. You cannot move until they stop."
+		end
 		if Pilot.goal ~= "" then
 			L[#L + 1] = "Your current goal: " .. Pilot.goal .. (Pilot.fail[goalKey(Pilot.goal)] and Pilot.fail[goalKey(Pilot.goal)] > 0 and (" (it has not worked " .. Pilot.fail[goalKey(Pilot.goal)] .. " times in a row, think about changing it)") or "")
 		end
@@ -9032,6 +10059,10 @@ Give 1 to 4 steps. Use ids exactly as listed (g1, p2, n1, k1...). If nothing is 
 		local chat = recentChatLines(nil, 5)
 		if #chat > 0 then
 			L[#L + 1] = "Recent chat (talk back only if it feels natural):\n" .. table.concat(chat, "\n")
+		end
+		local avoid = Outbox.avoidText(4)
+		if avoid ~= "" then
+			L[#L + 1] = avoid
 		end
 		if cfg.SmartMode then
 			L[#L + 1] = "Your feeling right now: " .. Smart.label()
@@ -9175,6 +10206,8 @@ Give 1 to 4 steps. Use ids exactly as listed (g1, p2, n1, k1...). If nothing is 
 					Pilot.state = "running from danger"
 				elseif M.running or M.pending or M.preempt then
 					Pilot.state = "doing what you asked"
+				elseif Core.Legs.yielding() and not Core.Legs.hardOff() then
+					Pilot.state = "you are steering"
 				elseif nowc - lastPlan >= math.max(1.5, tonumber(cfg.PilotEvery) or 4) then
 					local ok, err = pcall(Pilot.think)
 					lastPlan = os.clock()
@@ -9197,6 +10230,12 @@ Give 1 to 4 steps. Use ids exactly as listed (g1, p2, n1, k1...). If nothing is 
 	function Pilot.start()
 		if Pilot.active then
 			return true
+		end
+		if not Core.on() then
+			Core.setPower(true) -- you asked it to play, so the AI wakes up (this may already start the pilot)
+			if Pilot.active then
+				return true
+			end
 		end
 		Pilot.active, Pilot.paused = true, false
 		Pilot.startedAt = os.clock()
@@ -9336,6 +10375,156 @@ Give 1 to 4 steps. Use ids exactly as listed (g1, p2, n1, k1...). If nothing is 
 		return text:find("true", 1, true) ~= nil, trimChars(text, 60)
 	end
 end)()
+------------------------------------------------------------------ core parts: the rest of the body plugs into the brain stem
+;(function()
+	local P, M = Brain.Pilot, World.mouse
+	local lastMouseMode = "Auto"
+
+	Core.part("mind", {
+		label = "Mind (plays the game)",
+		hint = "Plans, learns and plays. Same as Start / Stop playing.",
+		get = function()
+			return P.active and true or false
+		end,
+		set = function(v)
+			if v then
+				P.start()
+			else
+				P.stop()
+			end
+		end,
+		live = function()
+			if not Core.on() then
+				return "off with the AI"
+			end
+			if not P.active then
+				return cfg.FreeWill and "free will is on, waiting" or "not playing"
+			end
+			return P.paused and "paused" or tostring(P.state)
+		end,
+		running = function()
+			return P.active
+		end,
+		stop = function()
+			if P.active then
+				P.stop()
+			end
+		end,
+		resume = function()
+			if cfg.FreeWill then
+				Walk.enable()
+			end
+			P.start()
+		end,
+	})
+
+	Core.part("eyes", {
+		label = "Eyes (sees the world)",
+		hint = "Players, buildings, held items, emotes and the screen.",
+		get = function()
+			return cfg.WorldSight and true or false
+		end,
+		set = function(v)
+			cfg.WorldSight = v
+			saveCfg()
+			if v then
+				World.start()
+			end
+		end,
+		live = function()
+			if not Core.on() then
+				return "off with the AI"
+			end
+			return cfg.WorldSight and "looking around" or "closed"
+		end,
+	})
+
+	Core.part("ears", {
+		label = "Ears (hears audio)",
+		hint = "Music, boomboxes and other sounds playing in the game.",
+		get = function()
+			return cfg.WorldHear and true or false
+		end,
+		set = function(v)
+			cfg.WorldHear = v
+			saveCfg()
+			if v then
+				World.start()
+			end
+		end,
+		live = function()
+			if not Core.on() then
+				return "off with the AI"
+			end
+			return cfg.WorldHear and "listening" or "closed"
+		end,
+	})
+
+	Core.part("hands", {
+		label = "Hands (cursor and taps)",
+		hint = "The visible cursor, tap dots, clicking, buttons and keys.",
+		get = function()
+			return cfg.MouseMode ~= "Off"
+		end,
+		set = function(v)
+			if v then
+				cfg.MouseMode = lastMouseMode
+			else
+				if cfg.MouseMode ~= "Off" then
+					lastMouseMode = cfg.MouseMode
+				end
+				cfg.MouseMode = "Off"
+				pcall(M.stopNow)
+			end
+			saveCfg()
+			M.refreshCursor()
+		end,
+		live = function()
+			if not Core.on() then
+				return "off with the AI"
+			end
+			if cfg.MouseMode == "Off" then
+				return "off"
+			end
+			return M.running and "busy" or (cfg.MouseMode == "Ask" and "asks you first" or "ready")
+		end,
+		stop = function()
+			pcall(M.stopNow)
+			pcall(M.refreshCursor)
+		end,
+	})
+
+	Core.part("voice", {
+		label = "Voice (chat replies and talking)",
+		hint = "Answers when someone says its name, and what it says on its own.",
+		get = function()
+			return cfg.AutoReply and true or false
+		end,
+		set = function(v)
+			cfg.AutoReply = v
+			saveCfg()
+		end,
+		live = function()
+			if not Core.on() then
+				return "off with the AI"
+			end
+			if not cfg.AutoReply then
+				return "quiet"
+			end
+			return "talks on its own: " .. tostring(cfg.TalkOwn or "Rarely"):lower()
+		end,
+	})
+
+	-- the nerves between the parts: what one part learns, the others can use
+	Core.listen("power", function(on)
+		if M.refreshCursor then
+			pcall(M.refreshCursor)
+		end
+		if not on then
+			Walk.cancel = true
+		end
+	end)
+end)()
 ------------------------------------------------------------------ reply pipeline
 local JobQ, working = {}, false
 local LastByUser = {}
@@ -9343,6 +10532,12 @@ local floodStart, floodCount = 0, 0
 
 local Pending, PendingTimer = {}, false
 local TrigCD, ReplyLog = {}, {}
+-- switching the AI off drops every chat job that was waiting, so nothing old is answered when it comes back
+Core.listen("power", function(on)
+	if not on then
+		JobQ, Pending = {}, {}
+	end
+end)
 
 local function matchTrigger(text)
 	local l = text:lower()
@@ -9457,9 +10652,10 @@ local function processSmart(job)
 		end
 	end
 	Dirty.smart = true
-	if say(d.reply) then
+	local sentOk, sentText = say(d.reply, { kind = "reply", to = items[1].p, addressed = items[1].addressed })
+	if sentOk then
 		for _, it in ipairs(items) do
-			addTrigger(it.p, it.cleaned, d.reply, job.group or #items > 1)
+			addTrigger(it.p, it.cleaned, sentText, job.group or #items > 1)
 		end
 		status("Replied to " .. whoText(items) .. " (feeling " .. Smart.label() .. ")")
 	else
@@ -9469,7 +10665,7 @@ end
 
 local function process(job)
 	if job.canned then
-		if say(job.canned) then
+		if say(job.canned, { kind = "canned", to = job.to, addressed = true }) then
 			status("Trigger message sent" .. (job.word and (" (" .. job.word .. ")") or ""))
 		else
 			status("Could not send chat message")
@@ -9509,10 +10705,11 @@ local function process(job)
 		status(err or "No answer")
 		return
 	end
-	if say(answer) then
+	local sentOk, sentText = say(answer, { kind = "reply", to = first.p, addressed = first.addressed })
+	if sentOk then
 		if how ~= "memory" then
 			for _, it in ipairs(items) do
-				addTrigger(it.p, it.cleaned, fitChat(answer, 200), job.group or #items > 1)
+				addTrigger(it.p, it.cleaned, sentText, job.group or #items > 1)
 			end
 		end
 		status("Replied to " .. whoText(items) .. " (" .. how .. ")")
@@ -9616,7 +10813,7 @@ local function onIncoming(p, rawText)
 			local reply = pickReply(tm.reply, p)
 			if reply ~= "" and #JobQ < 6 then
 				TrigCD[key] = now
-				JobQ[#JobQ + 1] = { canned = reply, word = word }
+				JobQ[#JobQ + 1] = { canned = reply, word = word, to = p }
 				if sentry then
 					sentry.x, sentry.w = "r", "trigger message"
 					Dirty.smart = true
@@ -9655,6 +10852,10 @@ local function onIncoming(p, rawText)
 	if last and now - last < (tonumber(cfg.CooldownPerUser) or 0) then
 		return
 	end
+	-- it already said hello to this player a while ago: no need to ask the AI or greet again
+	if not addressed and Outbox.isGreeting(Outbox.norm(cleaned), p) and Outbox.greetedRecently(p) then
+		return
+	end
 
 	-- smart mode: feelings decide whether to even look at a message that was not aimed at the AI
 	if cfg.SmartMode and not addressed and math.random() > Smart.chance(p, cleaned) then
@@ -9663,6 +10864,9 @@ local function onIncoming(p, rawText)
 			Dirty.smart = true
 		end
 		return
+	end
+	if not addressed and not Outbox.unaddressedOk(p) then
+		return -- nobody spoke to it: it does not answer the same person over and over, or flood the chat
 	end
 	if not underRateCap(p.UserId) then
 		return
@@ -10087,9 +11291,14 @@ mk("UIStroke", { Color = T.accent, Transparency = 0.5, Thickness = 1 }, Window)
 local TitleBar = mk("Frame", { Size = UDim2.new(1, 0, 0, 34), BackgroundColor3 = T.side, BorderSizePixel = 0 }, Window)
 newIcon(TitleBar, "gem", "S", UDim2.fromOffset(18, 18), UDim2.new(0, 10, 0.5, -9))
 mk("TextLabel", { Size = UDim2.new(0, 104, 1, 0), Position = UDim2.fromOffset(34, 0), BackgroundTransparency = 1, Text = "Sapphire Zene", TextXAlignment = Enum.TextXAlignment.Left, Font = Enum.Font.GothamBold, TextSize = 14, TextColor3 = T.text }, TitleBar)
-subLabel = mk("TextLabel", { Size = UDim2.new(1, -184, 1, 0), Position = UDim2.fromOffset(140, 0), BackgroundTransparency = 1, Text = "starting...", TextXAlignment = Enum.TextXAlignment.Left, Font = Enum.Font.Gotham, TextSize = 11, TextColor3 = T.dim, TextTruncate = Enum.TextTruncate.AtEnd }, TitleBar)
+subLabel = mk("TextLabel", { Size = UDim2.new(1, -318, 1, 0), Position = UDim2.fromOffset(140, 0), BackgroundTransparency = 1, Text = "starting...", TextXAlignment = Enum.TextXAlignment.Left, Font = Enum.Font.Gotham, TextSize = 11, TextColor3 = T.dim, TextTruncate = Enum.TextTruncate.AtEnd }, TitleBar)
 local HideBtn = mk("TextButton", { Size = UDim2.fromOffset(30, 24), Position = UDim2.new(1, -36, 0.5, -12), BackgroundColor3 = T.button, Text = "-", Font = Enum.Font.GothamBold, TextSize = 16, TextColor3 = T.text }, TitleBar)
 round(HideBtn, 6)
+-- two buttons that are always in reach: the master power and the walking switch
+local PowerBtn = mk("TextButton", { Name = "Power", Size = UDim2.fromOffset(54, 22), Position = UDim2.new(1, -96, 0.5, -11), BackgroundColor3 = T.accent, Text = "AI ON", Font = Enum.Font.GothamBold, TextSize = 11, TextColor3 = T.text, AutoButtonColor = false }, TitleBar)
+round(PowerBtn, 11)
+local WalkBtn = mk("TextButton", { Name = "Walk", Size = UDim2.fromOffset(68, 22), Position = UDim2.new(1, -170, 0.5, -11), BackgroundColor3 = T.accent, Text = "WALK ON", Font = Enum.Font.GothamBold, TextSize = 11, TextColor3 = T.text, AutoButtonColor = false }, TitleBar)
+round(WalkBtn, 11)
 draggable(TitleBar, Window)
 
 local Side = mk("ScrollingFrame", { Size = UDim2.new(0, 66, 1, -34), Position = UDim2.fromOffset(0, 34), BackgroundColor3 = T.side, BorderSizePixel = 0, ScrollBarThickness = 0, AutomaticCanvasSize = Enum.AutomaticSize.Y, CanvasSize = UDim2.new() }, Window)
@@ -10101,6 +11310,35 @@ newIcon(Fab, "gem", "S", UDim2.fromOffset(24, 24), UDim2.new(0.5, -12, 0.5, -12)
 draggable(Fab, Fab, function()
 	Window.Visible = not Window.Visible
 end)
+local function paintTitle()
+	local on = Core.on()
+	PowerBtn.Text = on and "AI ON" or "AI OFF"
+	PowerBtn.BackgroundColor3 = on and Color3.fromRGB(46, 160, 96) or T.danger
+	local legs = cfg.Legs ~= false
+	WalkBtn.Text = legs and "WALK ON" or "WALK OFF"
+	WalkBtn.BackgroundColor3 = (legs and on) and T.accent or T.off
+	Fab.BackgroundColor3 = on and T.accent or T.danger
+end
+Core.onChange = function()
+	pcall(paintTitle)
+	for _, fn in ipairs(Toggles) do
+		pcall(fn)
+	end
+	if Brain.Pilot and Brain.Pilot.onChange then
+		pcall(Brain.Pilot.onChange)
+	end
+end
+track(PowerBtn.Activated:Connect(function()
+	guard(function()
+		Core.setPower(not Core.on())
+	end)
+end))
+track(WalkBtn.Activated:Connect(function()
+	guard(function()
+		Core.Legs.set(cfg.Legs == false)
+	end)
+end))
+paintTitle()
 track(HideBtn.Activated:Connect(function()
 	Window.Visible = false
 end))
@@ -10215,12 +11453,12 @@ do
 	statusLabel = newLabel(sc, "Starting...", { color = T.dim, size = 12 })
 	moodLabel = newLabel(sc, "", { color = T.accentText, size = 12 })
 	keyStatus = newLabel(sc, "", { color = T.dim, size = 11 })
-	newToggle(sc, "Bot enabled", function()
-		return cfg.Enabled
+	newToggle(sc, "AI power (the master switch for everything)", function()
+		return Core.on()
 	end, function(v)
-		cfg.Enabled = v
-		saveCfg()
+		Core.setPower(v)
 	end)
+	newLabel(sc, "OFF stops walking, playing, free will, the cursor, chat replies, scanning and every AI call, all at once. Same as the AI ON / AI OFF button at the top of the window. Your settings are kept for when you turn it on again.", { color = T.dim, size = 11 })
 	newToggle(sc, "Auto reply in chat", function()
 		return cfg.AutoReply
 	end, function(v)
@@ -10879,8 +12117,20 @@ do
 
 	local wk = newCard(pg)
 	newHeader(wk, "Walking")
-	newLabel(wk, "The AI decides for itself whether to walk, and where: toward a player, a building, something to interact with, an unexplored spot, or back to where it started. Staying put is a normal choice. Moods change how often it moves.", { color = T.dim, size = 11 })
-	newToggle(wk, "Let the AI decide when and where to walk", function()
+	newToggle(wk, "AI may move my character (WALK ON / WALK OFF)", function()
+		return cfg.Legs ~= false
+	end, function(v)
+		Core.Legs.set(v)
+	end)
+	newLabel(wk, "This is the master walking switch. OFF = the AI never walks, runs, jumps, dodges or follows: only you move your character, whatever else is on (free will, playing, curious). The same button is at the top of the window.", { color = T.accent, size = 11 })
+	newToggle(wk, "Wait when I steer (it lets go the moment I touch the controls)", function()
+		return cfg.YieldToMe ~= false
+	end, function(v)
+		cfg.YieldToMe = v
+		saveCfg()
+	end)
+	newLabel(wk, "With the walking switch ON, the AI decides for itself whether to walk, and where: toward a player, a building, something to interact with, an unexplored spot, or back to where it started. Staying put is a normal choice. Moods change how often it moves.", { color = T.dim, size = 11 })
+	newToggle(wk, "Wander by itself when it has nothing else to do", function()
 		return cfg.AutoWalk
 	end, function(v)
 		cfg.AutoWalk = v
@@ -10924,7 +12174,7 @@ do
 	Walk.onLog = function()
 		walkLog.Text = table.concat(Walk.log, "\n")
 	end
-	newLabel(wk, "Taking over the controls yourself? Tap Stop walking or turn this off. It also waits a while whenever it sees you steering.", { color = T.dim, size = 11 })
+	newLabel(wk, "Want to walk by yourself? Turn WALK OFF at the top of the window. With 'Wait when I steer' on, it also lets go on its own whenever you touch the controls.", { color = T.dim, size = 11 })
 
 	local function ensureMouse()
 		if cfg.MouseMode == "Off" then
@@ -11591,13 +12841,17 @@ end
 	local pg = newPage("Play")
 	local P, Check, M = Brain.Pilot, Brain.Check, World.mouse
 	local headLabel, nowLabel, goalLabel, bodyLabel, statLabel, startBtn, pauseBtn, feedLabel, checkLabel, noteBox
-	local pill, pillText, pillBtn
+	local pill, pillText, pillBtn, legsBtn
+	local brainPaint
 
 	-- the small bar on screen: always shows what the AI is up to and lets you stop it with one tap
-	pill = mk("Frame", { Name = "Bar", Size = UDim2.fromOffset(268, 30), Position = UDim2.new(0.5, -134, 0, 8), BackgroundColor3 = T.bg, BackgroundTransparency = 0.08, Visible = false, ZIndex = 60 }, Gui)
+	pill = mk("Frame", { Name = "Bar", Size = UDim2.fromOffset(348, 30), Position = UDim2.new(0.5, -174, 0, 8), BackgroundColor3 = T.bg, BackgroundTransparency = 0.08, Visible = false, ZIndex = 60 }, Gui)
 	round(pill, 15)
 	mk("UIStroke", { Color = T.accent, Transparency = 0.2, Thickness = 1 }, pill)
-	pillText = mk("TextLabel", { Size = UDim2.new(1, -88, 1, 0), Position = UDim2.fromOffset(12, 0), BackgroundTransparency = 1, Text = "", TextXAlignment = Enum.TextXAlignment.Left, Font = Enum.Font.GothamMedium, TextSize = 11, TextColor3 = T.text, TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 61 }, pill)
+	pillText = mk("TextLabel", { Size = UDim2.new(1, -168, 1, 0), Position = UDim2.fromOffset(12, 0), BackgroundTransparency = 1, Text = "", TextXAlignment = Enum.TextXAlignment.Left, Font = Enum.Font.GothamMedium, TextSize = 11, TextColor3 = T.text, TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 61 }, pill)
+	-- walking switch on the bar: you can take the steering back without opening the window
+	legsBtn = mk("TextButton", { Name = "LegsBtn", Size = UDim2.fromOffset(80, 22), Position = UDim2.new(1, -158, 0.5, -11), BackgroundColor3 = T.accent, Text = "WALK ON", Font = Enum.Font.GothamBold, TextSize = 11, TextColor3 = T.text, AutoButtonColor = false, ZIndex = 62 }, pill)
+	round(legsBtn, 11)
 	pillBtn = mk("TextButton", { Size = UDim2.fromOffset(70, 22), Position = UDim2.new(1, -76, 0.5, -11), BackgroundColor3 = T.danger, Text = "PAUSE", Font = Enum.Font.GothamBold, TextSize = 11, TextColor3 = T.text, AutoButtonColor = false, ZIndex = 62 }, pill)
 	round(pillBtn, 11)
 	draggable(pillText, pill)
@@ -11639,10 +12893,21 @@ end
 			end
 			feedLabel.Text = #lines > 0 and table.concat(lines, "\n") or "Nothing yet. Press Start playing."
 		end
-		pill.Visible = s.active and cfg.Pill ~= false
-		pillText.Text = "Sapphire Zene  |  " .. (s.paused and "paused" or (s.goal ~= "" and s.goal or tostring(s.state)))
+		local legsOn = cfg.Legs ~= false
+		pill.Visible = Core.on() and cfg.Pill ~= false and (s.active or cfg.FreeWill or cfg.AutoWalk)
+		if s.active then
+			pillText.Text = "Sapphire Zene  |  " .. (s.paused and "paused" or (s.goal ~= "" and s.goal or tostring(s.state)))
+		else
+			pillText.Text = "Sapphire Zene  |  " .. (legsOn and "may wander by itself" or "you walk")
+		end
+		legsBtn.Text = legsOn and "WALK ON" or "WALK OFF"
+		legsBtn.BackgroundColor3 = legsOn and T.accent or T.off
 		pillBtn.Text = s.paused and "RESUME" or "PAUSE"
 		pillBtn.BackgroundColor3 = s.paused and T.accent or T.danger
+		pillBtn.Visible = s.active
+		if brainPaint then
+			brainPaint()
+		end
 	end
 	P.onChange = function()
 		pcall(refresh)
@@ -11650,6 +12915,12 @@ end
 	track(pillBtn.Activated:Connect(function()
 		guard(function()
 			P.pause(not P.paused)
+			refresh(true)
+		end)
+	end))
+	track(legsBtn.Activated:Connect(function()
+		guard(function()
+			Core.Legs.set(cfg.Legs == false)
 			refresh(true)
 		end)
 	end))
@@ -11668,6 +12939,44 @@ end
 			P.start()
 		end
 		refresh(true)
+	end
+
+	-- ---------------- the brain: one power switch, every system connected to it
+	local bc = newCard(pg)
+	newHeader(bc, "Brain: every system is connected to this power")
+	local powerBtn
+	powerBtn = newButton(bc, "", function()
+		Core.setPower(not Core.on())
+	end)
+	local brainNote = newLabel(bc, "", { size = 11, color = T.dim })
+	local partNotes = {}
+	for _, part in ipairs(Core.list()) do
+		newToggle(bc, part.label, part.get, function(v)
+			part.set(v)
+			Core.changed()
+		end)
+		partNotes[part.name] = newLabel(bc, "", { size = 11, color = T.dim })
+	end
+	newToggle(bc, "Wait when I steer (the AI lets go the moment I touch the controls)", function()
+		return cfg.YieldToMe ~= false
+	end, function(v)
+		cfg.YieldToMe = v
+		saveCfg()
+	end)
+	local steerNote = newLabel(bc, "", { size = 11, color = T.accentText })
+	brainPaint = function()
+		local on = Core.on()
+		powerBtn.Text = on and "AI ON  (tap to turn the whole AI off)" or "AI OFF  (tap to turn the whole AI on)"
+		powerBtn.BackgroundColor3 = on and Color3.fromRGB(46, 160, 96) or T.danger
+		brainNote.Text = on and "OFF stops everything at once: walking, playing, free will, the cursor, chat and scanning. Your character is then fully yours. Settings are kept for when you turn it on again." or "The AI is OFF: nothing is walking, playing, clicking, scanning or chatting."
+		for _, part in ipairs(Core.list()) do
+			local lbl = partNotes[part.name]
+			if lbl then
+				local live = part.live and part.live() or ""
+				lbl.Text = (part.hint or "") .. ((live ~= "" and ("\nNow: " .. live)) or "")
+			end
+		end
+		steerNote.Text = Core.Legs.note and Core.Legs.note ~= "" and Core.Legs.note or ""
 	end
 
 	-- ---------------- state
@@ -11722,6 +13031,40 @@ end
 		World.curious.forget()
 		status("It will be curious about everything here again")
 	end)
+
+	-- ---------------- chat filter: what it said, what was held back and why
+	local cf = newCard(pg)
+	newHeader(cf, "Chat manners")
+	newLabel(cf, "Every message goes through a filter: labels, notes and its own prompt are cut out, repeats and greeting spam are blocked, and it only talks without being asked when someone is around. Answering players who talk to it is never blocked unless it would repeat itself.", { size = 11, color = T.dim })
+	local talkBtn
+	local function talkText()
+		local m = Outbox.talkMode()
+		local d = { Never = "never (only answers people)", Rarely = "rarely (a few times in 15 minutes)", Sometimes = "sometimes (about every 2 to 3 minutes)" }
+		return "Talks on its own: " .. d[m] .. "  (tap to change)"
+	end
+	talkBtn = newButton(cf, talkText(), function()
+		local nxt = { Never = "Rarely", Rarely = "Sometimes", Sometimes = "Never" }
+		cfg.TalkOwn = nxt[Outbox.talkMode()]
+		saveCfg()
+		talkBtn.Text = talkText()
+	end)
+	local filterLabel = newLabel(cf, "", { size = 11 })
+	local function paintFilter()
+		local L = { string.format("Sent %d, held back %d.", Outbox.stats.sent, Outbox.stats.blocked) }
+		local shown = 0
+		for i = #Outbox.log, 1, -1 do
+			local e = Outbox.log[i]
+			if not e.ok and shown < 6 then
+				shown = shown + 1
+				L[#L + 1] = "held back (" .. tostring(e.why) .. "): " .. e.text
+			end
+		end
+		filterLabel.Text = table.concat(L, "\n")
+	end
+	paintFilter()
+	Outbox.onChange = function()
+		pcall(paintFilter)
+	end
 
 	-- ---------------- the pointer
 	local pc = newCard(pg)
@@ -12170,7 +13513,7 @@ end
 buildUI()
 
 -- the AI keeps playing after the script starts again (the PAUSE bar on screen and the Play tab stop it)
-if cfg.AutoResume ~= false and (cfg.Pilot or cfg.FreeWill) and Brain.Pilot then
+if Core.on() and cfg.AutoResume ~= false and (cfg.Pilot or cfg.FreeWill) and Brain.Pilot then
 	task.delay(5, function()
 		if Alive and not Brain.Pilot.active then
 			pcall(Brain.Pilot.start)
@@ -12181,6 +13524,8 @@ end
 G.SapphireZene.World, G.SapphireZene.Keys, G.SapphireZene.Walk, G.SapphireZene.Free = World, Keys, Walk, Free
 G.SapphireZene.Reflex, G.SapphireZene.RangeVis = Reflex, RangeVis
 G.SapphireZene.Gui, G.SapphireZene.cfg, G.SapphireZene.Brain = GuiRef, cfg, Brain
+G.SapphireZene.Outbox = Outbox
+G.SapphireZene.Core = Core
 G.SapphireZene.Save = function()
 	pcall(saveCfg)
 	pcall(flush, true)
@@ -12196,7 +13541,9 @@ G.SapphireZene.Cleanup = function()
 	baseCleanup()
 end
 
-if not hasFS then
+if not Core.on() then
+	status("The AI is switched OFF. Tap the AI OFF button at the top of the window to turn it on.")
+elseif not hasFS then
 	status("Your executor can't save files - memory won't survive rejoining")
 elseif not httprequest then
 	status("Your executor has no HTTP request function - AI replies won't work")
