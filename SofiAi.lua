@@ -1,5 +1,5 @@
 --[[
-	SAPPHIRE ZENE v4.2  -  an AI that plays Roblox games (built for Delta / mobile)
+	SAPPHIRE ZENE v4.3  -  an AI that plays Roblox games (built for Delta / mobile)
 
 	* Plays on its own like a real player: moves because it has a reason, runs from danger, fights,
 	  collects, talks to NPCs, presses the game's buttons with a visible cursor and tap dots
@@ -12,6 +12,16 @@
 	  or hiding, grabs a nearby coin first when it is safe, and learns which escape worked against which enemy
 	* Skills: finds tools, ability buttons and hotkeys, tries unknown ones when it is safe, learns what they do (heal, dash, shield,
 	  ranged damage), and uses them in fights, escapes and when hurt
+	* v4.3 Sight: looks at the map before it walks, so it never keeps walking at something behind a wall, too high or across a gap
+	  (it goes around, or picks something else); learns places it cannot get to and tells the planner
+	* v4.3 Kill bricks: learns which parts hurt when touched (from the damage itself), saves them in the game file, draws them
+	  on its map and walks around them, and steps away from ones that move
+	* v4.3 No more rate limits: every model has its own cooldown, a limited model is swapped for another one at once, and after
+	  3 limited keys it slows down and rests them instead of hammering (Keys tab: Auto swap, Gentle with the keys)
+	* v4.3 Smart gear: knows what each tool is for (weapon, ranged, pickaxe/axe/rod, key, light, speed coil, heal) and holds the
+	  right one: sword up close, bow far away, the pickaxe at ore, the key at doors, a light in the dark; learns which tools hurt
+	* v4.3 AI camera: turns the view to what it needs to see (the fight, a threat, the ledge or wall ahead, where it goes, a look
+	  around when idle), shows where it looks (ring + line + the bar), lets go when you drag the screen; CAM ON / OFF on the bar
 	* Chats when someone says its name (Sapphire Zene) or yours (warmachine12908), or everyone (Settings)
 	* Free API keys: Groq, Gemini, OpenRouter, Cerebras, NVIDIA, HuggingFace (Keys tab, up to 4)
 	* Knowledge, Triggers, Memory, Coding and Ask AI tabs, Smart mode with emotions
@@ -30,7 +40,7 @@
 local PRESET_KEYS = { "", "", "", "" } -- optional: paste up to 4 API keys here (you can also use the Keys tab)
 local CAP_CHAT, CAP_TRIGGER, CAP_SMART, CAP_ASK, CAP_WORLD = 6000, 5500, 7000, 2000, 99999999
 local DIR = "SofiAI" -- data folder name stays the same on purpose: your files never reset
-local VERSION = "4.2"
+local VERSION = "4.3"
 
 local Players = game:GetService("Players")
 local HttpService = game:GetService("HttpService")
@@ -804,9 +814,18 @@ local Default = {
 	UseSkills = true,
 	SmartFlee = true,
 	UseLearned = true,
+	AutoSwap = true,
+	GentleKeys = true,
+	RotateAt = 3,
+	MaxPaceWait = 6,
+	Sight = true,
+	LearnKillers = true,
+	SmartGear = true,
+	AICamera = true,
+	ShowGaze = true,
 	}
 for i = 1, 4 do
-	Default.Slots[i] = { key = "", provider = "", model = "", models = {}, modelsAt = 0, on = true }
+	Default.Slots[i] = { key = "", provider = "", model = "", home = "", models = {}, modelsAt = 0, on = true }
 end
 local DICT = { Roles = true }
 
@@ -840,7 +859,7 @@ do
 			for i = 1, math.min(4, #order) do
 				local prov = order[i]
 				local model = type(saved.Models) == "table" and saved.Models[prov] or ""
-				cfg.Slots[i] = { key = saved.Keys[prov], provider = prov, model = tostring(model or ""), models = {}, modelsAt = 0, on = true }
+				cfg.Slots[i] = { key = saved.Keys[prov], provider = prov, model = tostring(model or ""), home = tostring(model or ""), models = {}, modelsAt = 0, on = true }
 			end
 			cfg.SlotCount = math.max(1, math.min(4, #order))
 		end
@@ -852,7 +871,7 @@ do
 		local s = type(cfg.Slots[i]) == "table" and cfg.Slots[i] or {}
 		local key = tostring(s.key or "")
 		local prov = (Providers[s.provider or ""] and s.provider) or (key ~= "" and detectProvider(key)) or ""
-		cfg.Slots[i] = { key = key, provider = prov, model = tostring(s.model or ""), models = type(s.models) == "table" and s.models or {}, modelsAt = tonumber(s.modelsAt) or 0, on = s.on ~= false }
+		cfg.Slots[i] = { key = key, provider = prov, model = tostring(s.model or ""), home = tostring(s.home or ""), models = type(s.models) == "table" and s.models or {}, modelsAt = tonumber(s.modelsAt) or 0, on = s.on ~= false }
 	end
 	for i, k in ipairs(PRESET_KEYS) do
 		if i <= 4 and type(k) == "string" and k ~= "" and cfg.Slots[i].key == "" then
@@ -865,6 +884,9 @@ do
 		local s = cfg.Slots[i]
 		if s.provider ~= "" and s.model == "" then
 			s.model = Providers[s.provider].default
+		end
+		if s.home == "" then
+			s.home = s.model -- the model you picked: a key that had to swap comes back to it
 		end
 		if s.key ~= "" and i > cfg.SlotCount then
 			cfg.SlotCount = i
@@ -1949,7 +1971,7 @@ local function post(url, key, body, prov)
 	if not ok or type(res) ~= "table" then
 		return tostring(res), 0
 	end
-	return tostring(res.Body or res.body or ""), tonumber(res.StatusCode or res.status_code or res.Status) or 0
+	return tostring(res.Body or res.body or ""), tonumber(res.StatusCode or res.status_code or res.Status) or 0, res.Headers or res.headers
 end
 
 local function httpGet(url, headers)
@@ -2074,8 +2096,294 @@ end
 
 local Keys = { last = {} }
 do
-	local backoff, bad = {}, {}
+	local bad = {}
+	local cool = {} -- cool[i][model] = { t = clock when it may be used again, n = limits in a row }
+	local hold = {} -- hold[i] = clock until which the WHOLE key is out of quota (every model of it)
+	local pace = {} -- pace[i] = { last = clock of the last request, gap = seconds to keep between requests, base, streak }
+	local hits = {} -- { t, i }: rate limits of the last two minutes (the "3 keys got limited" rule)
+	local recent = {} -- clock of every rate limit of the last five minutes (how hard to slow the brain down)
 	local rr = 0
+	local BASEGAP = { Groq = 2.2, Gemini = 4.5, OpenRouter = 3.2, Cerebras = 2.2, NVIDIA = 1.6, HuggingFace = 2.0 }
+	Keys.slowUntil = 0
+
+	local function short(m)
+		return tostring(m or ""):match("[^/]+$") or tostring(m or "")
+	end
+
+	------------------------------------------------------------ reading what the provider says about a rate limit
+	-- "1m25.3s", "7.2s", "540ms", "2h" -> seconds
+	local function durOf(str)
+		local total, any = 0, false
+		for num, unit in tostring(str or ""):lower():gmatch("([%d%.]+)(%a+)") do
+			local n = tonumber(num)
+			if n then
+				if unit == "ms" then
+					total, any = total + n / 1000, true
+				elseif unit == "s" or unit == "sec" then
+					total, any = total + n, true
+				elseif unit == "m" or unit == "min" then
+					total, any = total + n * 60, true
+				elseif unit == "h" then
+					total, any = total + n * 3600, true
+				end
+			end
+		end
+		return any and total or nil
+	end
+	local TIMEPAT = "([%d%.]+%a+[%d%.%a]*)"
+	local function parseWait(headers, raw)
+		if type(headers) == "table" then
+			for k, v in pairs(headers) do
+				if tostring(k):lower() == "retry-after" then
+					local n = tonumber(v) or durOf(v)
+					if n and n > 0 then
+						return n
+					end
+				end
+			end
+		end
+		local low = tostring(raw or ""):lower()
+		for _, pat in ipairs({ "try again in " .. TIMEPAT, "retry in " .. TIMEPAT, "retry after " .. TIMEPAT, "retrydelay[\"'%s:]+" .. TIMEPAT, "reset in " .. TIMEPAT, "available in " .. TIMEPAT }) do
+			local s = low:match(pat)
+			local n = s and durOf(s)
+			if n and n > 0 then
+				return n
+			end
+		end
+		if type(headers) == "table" then
+			local best
+			for k, v in pairs(headers) do
+				local lk = tostring(k):lower()
+				if lk == "x-ratelimit-reset-requests" or lk == "x-ratelimit-reset-tokens" then
+					local n = tonumber(v) or durOf(v)
+					if n and n > 0 and (not best or n < best) then
+						best = n
+					end
+				end
+			end
+			if best then
+				return best
+			end
+		end
+		return nil
+	end
+	local function isDaily(raw)
+		local low = tostring(raw or ""):lower()
+		return low:find("per day", 1, true) ~= nil or low:find("daily", 1, true) ~= nil or low:find("per%-day") ~= nil or low:find("rpd", 1, true) ~= nil or low:find("tpd", 1, true) ~= nil
+	end
+
+	------------------------------------------------------------ which models a key can use, in the order they suit
+	local function rank(P, m)
+		for k, pat in ipairs(P.prefer or {}) do
+			if m:find(pat) then
+				return k
+			end
+		end
+		return 99
+	end
+	function Keys.candidates(i)
+		local s = cfg.Slots[i]
+		local P = Providers[s.provider]
+		local list, seen = {}, {}
+		local function add(m, force)
+			if m and m ~= "" and not seen[m] and (force or not Keys.badModel(m)) then
+				seen[m] = true
+				list[#list + 1] = m
+			end
+		end
+		add(s.home, true) -- the one you picked comes back as soon as it is allowed again
+		add(s.model, true)
+		if P then
+			local rest = {}
+			for _, m in ipairs(s.models or {}) do
+				if not seen[m] then
+					rest[#rest + 1] = m
+				end
+			end
+			table.sort(rest, function(a, b)
+				local ra, rb = rank(P, a), rank(P, b)
+				if ra ~= rb then
+					return ra < rb
+				end
+				return a < b
+			end)
+			for _, m in ipairs(rest) do
+				add(m)
+			end
+			if #list == 0 then
+				add(P.default, true) -- no list of models yet: the provider's own default
+			end
+		end
+		return list
+	end
+
+	------------------------------------------------------------ resting (cooldowns) and spacing
+	function Keys.coolLeft(i, model)
+		local now = os.clock()
+		local left = 0
+		if hold[i] and hold[i] > now then
+			left = hold[i] - now
+		end
+		local c = cool[i] and cool[i][model]
+		if c and c.t > now then
+			left = math.max(left, c.t - now)
+		end
+		return left
+	end
+	-- seconds until this key has any model it may use
+	function Keys.slotLeft(i)
+		local best
+		for _, m in ipairs(Keys.candidates(i)) do
+			local l = Keys.coolLeft(i, m)
+			if not best or l < best then
+				best = l
+			end
+			if best <= 0 then
+				break
+			end
+		end
+		return best or 0
+	end
+	local function paceOf(i)
+		local s = cfg.Slots[i]
+		local p = pace[i]
+		if not p or p.prov ~= s.provider then
+			local g = BASEGAP[s.provider] or 2.5
+			p = { last = 0, gap = g, base = g, streak = 0, prov = s.provider }
+			pace[i] = p
+		end
+		return p
+	end
+	local function paceWait(i)
+		if cfg.GentleKeys == false then
+			return 0
+		end
+		local p = paceOf(i)
+		return math.max(0, p.last + p.gap - os.clock())
+	end
+	Keys.paceWait = paceWait
+	-- a request is about to go out on this key
+	local function touch(i)
+		paceOf(i).last = os.clock()
+	end
+	function Keys.ok(i, model)
+		if cool[i] then
+			cool[i][model] = nil
+		end
+		local p = paceOf(i)
+		p.streak = p.streak + 1
+		if p.streak >= 6 then
+			p.gap = math.max(p.base, p.gap * 0.85)
+			p.streak = 0
+		end
+	end
+	-- how hard the brain should hold back right now: 0 none, 1 a little, 2 more, 3 a lot
+	function Keys.pressure()
+		local now = os.clock()
+		local n = 0
+		for _, t in ipairs(recent) do
+			if now - t <= 300 then
+				n = n + 1
+			end
+		end
+		if n == 0 then
+			return 0
+		elseif n < 3 then
+			return 1
+		elseif n < 6 then
+			return 2
+		end
+		return 3
+	end
+	function Keys.slowSecs()
+		return ({ 0, 3, 6, 12 })[Keys.pressure() + 1]
+	end
+
+	-- a request got a rate limit (or the model is overloaded): rest that model and remember it
+	function Keys.limited(i, model, headers, raw, soft)
+		cool[i] = cool[i] or {}
+		local now = os.clock()
+		local rec = cool[i][model]
+		local n = ((rec and rec.n) or 0) + 1
+		local w = parseWait(headers, raw)
+		local low = tostring(raw or ""):lower()
+		local secs
+		if soft then
+			secs = math.min(60, w and (w + 0.5) or 10)
+		elseif low:find("limit: 0", 1, true) then
+			secs = 21600 -- this model has no free quota at all on this key
+		elseif w then
+			secs = w + 1
+		elseif isDaily(raw) then
+			secs = 1800
+		else
+			secs = 15 * 2 ^ (n - 1)
+		end
+		secs = math.max(4, math.min(secs, 21600))
+		cool[i][model] = { t = now + secs, n = n }
+		local acct = (not soft) and low:find("free%-models%-per%-day") ~= nil
+		if acct then
+			hold[i] = now + secs
+		end
+		local p = paceOf(i)
+		p.gap = math.min(30, p.gap * 1.6)
+		p.streak = 0
+		if not soft then
+			hits[#hits + 1] = { t = now, i = i }
+			recent[#recent + 1] = now
+		end
+		Keys.rotate()
+		if Keys.onRefresh then
+			pcall(Keys.onRefresh)
+		end
+		return secs, acct
+	end
+
+	-- when enough keys have been limited (3, or all of them if you use fewer) every limited key moves on to a different model
+	function Keys.rotate(force)
+		local now = os.clock()
+		for k = #hits, 1, -1 do
+			if now - hits[k].t > 120 then
+				table.remove(hits, k)
+			end
+		end
+		for k = #recent, 1, -1 do
+			if now - recent[k] > 300 then
+				table.remove(recent, k)
+			end
+		end
+		local who, n = {}, 0
+		for _, h in ipairs(hits) do
+			if not who[h.i] then
+				who[h.i] = true
+				n = n + 1
+			end
+		end
+		local need = math.max(1, math.min(tonumber(cfg.RotateAt) or 3, #Keys.active()))
+		if (n < need or cfg.AutoSwap == false) and not force then
+			return false
+		end
+		local moved = {}
+		for i in pairs(who) do
+			local s = cfg.Slots[i]
+			if s.key ~= "" and s.provider ~= "" then
+				for _, m in ipairs(Keys.candidates(i)) do
+					if m ~= s.model and Keys.coolLeft(i, m) <= 0 then
+						moved[#moved + 1] = "Key " .. i .. " to " .. short(m)
+						s.model = m
+						break
+					end
+				end
+			end
+		end
+		hits = {}
+		Keys.slowUntil = now + 90
+		if #moved > 0 then
+			saveCfg()
+			status(n .. " key" .. (n == 1 and " was" or "s were") .. " rate limited, so I switched models: " .. table.concat(moved, ", "))
+		end
+		return true
+	end
 
 	function Keys.active()
 		local l = {}
@@ -2092,14 +2400,14 @@ do
 		local s = cfg.Slots[i]
 		key = (tostring(key or ""):gsub("[%s\"']", ""))
 		s.key = key
-		bad[i], backoff[i] = nil, nil
+		bad[i], cool[i], hold[i], pace[i] = nil, nil, nil, nil
 		if key == "" then
-			s.provider, s.model, s.models, s.modelsAt = "", "", {}, 0
+			s.provider, s.model, s.home, s.models, s.modelsAt = "", "", "", {}, 0
 			return nil
 		end
 		local prov = detectProvider(key)
 		if prov and s.provider ~= prov then
-			s.provider, s.model, s.models, s.modelsAt = prov, Providers[prov].default, {}, 0
+			s.provider, s.model, s.home, s.models, s.modelsAt = prov, Providers[prov].default, Providers[prov].default, {}, 0
 		end
 		return prov
 	end
@@ -2107,12 +2415,22 @@ do
 	function Keys.setProvider(i, prov)
 		local s = cfg.Slots[i]
 		if Providers[prov] and s.provider ~= prov then
-			s.provider, s.model, s.models, s.modelsAt = prov, Providers[prov].default, {}, 0
+			s.provider, s.model, s.home, s.models, s.modelsAt = prov, Providers[prov].default, Providers[prov].default, {}, 0
+			cool[i], hold[i], pace[i] = nil, nil, nil
 		end
 	end
 
-	-- which keys to try, in order, for a job (main / coding / ask / world)
-	function Keys.order(role)
+	-- you picked a model for this key: that is the one it comes back to
+	function Keys.pick(i, model)
+		local s = cfg.Slots[i]
+		s.model, s.home = model, model
+		if cool[i] then
+			cool[i][model] = nil
+		end
+	end
+
+	-- which keys to try, in order, for a job (main / coding / ask / world). peek = do not advance the round robin
+	function Keys.order(role, peek)
 		local act = Keys.active()
 		if #act == 0 then
 			return {}
@@ -2120,7 +2438,9 @@ do
 		local primary = cfg.Roles[role] or 1
 		local list = {}
 		if cfg.ShareLoad and #act > 1 then
-			rr = rr + 1
+			if not peek then
+				rr = rr + 1
+			end
 			for k = 0, #act - 1 do
 				list[#list + 1] = act[(rr + k - 1) % #act + 1]
 			end
@@ -2142,26 +2462,85 @@ do
 				end
 			end
 		end
-		local now, ready = os.clock(), {}
+		local ready = {}
 		for _, i in ipairs(list) do
-			if not (backoff[i] and now < backoff[i]) then
+			if Keys.slotLeft(i) <= 0 then
 				ready[#ready + 1] = i
 			end
 		end
 		return ready
 	end
 
+	-- is there a key that can take a request right now (not resting, not too soon after its last one)?
+	function Keys.free(role)
+		for _, i in ipairs(Keys.order(role or "main", true)) do
+			if paceWait(i) <= 0.5 then
+				return true
+			end
+		end
+		return false
+	end
+	-- seconds until some key is free again (0 if one is)
+	function Keys.nextReady(role)
+		local act = Keys.active()
+		local best
+		for _, i in ipairs(act) do
+			local w = math.max(Keys.slotLeft(i), 0)
+			if w <= 0 then
+				w = paceWait(i)
+			end
+			if not best or w < best then
+				best = w
+			end
+		end
+		return best or 0
+	end
+	-- a line for the Keys page about keys that are resting
+	function Keys.restText(i)
+		local s = cfg.Slots[i]
+		if s.key == "" or s.provider == "" then
+			return ""
+		end
+		local bits = {}
+		local now = os.clock()
+		for m, c in pairs(cool[i] or {}) do
+			if c.t > now then
+				bits[#bits + 1] = short(m) .. " " .. math.ceil(c.t - now) .. "s"
+			end
+		end
+		if #bits == 0 then
+			return ""
+		end
+		table.sort(bits)
+		return "Resting after a rate limit: " .. table.concat(bits, ", ", 1, math.min(#bits, 3)) .. (#bits > 3 and (" and " .. (#bits - 3) .. " more") or "") .. ". It uses another model meanwhile."
+	end
+	function Keys.limitedCount()
+		return #recent
+	end
+
 	local function callSlot(i, messages, maxTokens, keep)
 		local s = cfg.Slots[i]
 		local P = Providers[s.provider]
-		local list = (#s.models > 0) and s.models or { P.default }
-		local tried = {}
-		local model = s.model ~= "" and s.model or (list[1] or "")
-		if model == "" then
+		if not P then
+			return nil, "Key " .. i .. ": provider not known"
+		end
+		local list = Keys.candidates(i)
+		if #list == 0 then
 			return nil, "Key " .. i .. ": pick a model first"
 		end
+		local model
+		for _, m in ipairs(list) do
+			if Keys.coolLeft(i, m) <= 0 then
+				model = m
+				break
+			end
+		end
+		if not model then
+			return nil, "Key " .. i .. " is resting for " .. math.ceil(Keys.slotLeft(i)) .. " s after a rate limit"
+		end
+		local tried, swaps = {}, 0
 		local useExtras = true
-		for _ = 1, 5 do
+		for _ = 1, 7 do
 			tried[model] = true
 			local body = { model = model, messages = messages, temperature = cfg.Temperature, max_tokens = maxTokens or cfg.MaxTokens }
 			local extra = useExtras and extraParams(s.provider, model) or nil
@@ -2171,7 +2550,8 @@ do
 				end
 				body.max_tokens = body.max_tokens + 400 -- room for hidden reasoning
 			end
-			local raw, code = post(P.url .. "/chat/completions", s.key, body, s.provider)
+			touch(i)
+			local raw, code, headers = post(P.url .. "/chat/completions", s.key, body, s.provider)
 			local data = jdecode(raw)
 			if code >= 200 and code < 300 and type(data) == "table" and type(data.choices) == "table" and data.choices[1] then
 				local msg = data.choices[1].message or {}
@@ -2180,17 +2560,43 @@ do
 					if model ~= s.model then
 						s.model = model
 						saveCfg()
-						status("Key " .. i .. " switched to model " .. model)
+						status("Key " .. i .. " is using model " .. short(model))
 					end
+					Keys.ok(i, model)
 					return text
 				end
 				return nil, "Empty reply from " .. model .. " (try a higher Max tokens)"
 			end
 			local errText = errorText(data, raw)
-			if isModelError(code, raw) then
+			local low = tostring(raw):lower()
+			if code == 429 or code == 503 or (code == 500 and low:find("overload", 1, true)) then
+				local soft = code ~= 429
+				if #s.models == 0 and (s.modelsAt or 0) == 0 and swaps == 0 and not soft then
+					pcall(Keys.refresh, i) -- learn which other models this key has, so there is somewhere to go
+				end
+				local secs, acct = Keys.limited(i, model, headers, raw, soft)
+				local nxt
+				if cfg.AutoSwap ~= false and not acct and swaps < 3 then
+					for _, m in ipairs(Keys.candidates(i)) do
+						if not tried[m] and Keys.coolLeft(i, m) <= 0 then
+							nxt = m
+							break
+						end
+					end
+				end
+				if nxt then
+					swaps = swaps + 1
+					status(("Key %d: %s is %s, trying %s"):format(i, short(model), soft and "busy" or "rate limited", short(nxt)))
+					model, useExtras = nxt, true
+				else
+					return nil, ("Key %d %s (%s), resting %d s"):format(i, soft and "is busy" or "rate limited", short(model), math.ceil(secs))
+				end
+			elseif isModelError(code, raw) then
+				cool[i] = cool[i] or {}
+				cool[i][model] = { t = os.clock() + 3600, n = 1 } -- gone or not allowed: do not pick it again for a while
 				local nextModel
-				for _, m in ipairs(list) do
-					if not tried[m] then
+				for _, m in ipairs(Keys.candidates(i)) do
+					if not tried[m] and Keys.coolLeft(i, m) <= 0 then
 						nextModel = m
 						break
 					end
@@ -2200,9 +2606,6 @@ do
 				end
 				model = nextModel
 				useExtras = true
-			elseif code == 429 then
-				backoff[i] = os.clock() + 20
-				return nil, "Key " .. i .. " rate limited (429)"
 			elseif code == 401 or code == 403 then
 				bad[i] = os.clock()
 				return nil, "Key " .. i .. " was rejected (" .. tostring(code) .. ")"
@@ -2226,21 +2629,50 @@ do
 			if #Keys.active() == 0 then
 				return nil, "No API key yet (Keys tab)"
 			end
-			return nil, "All keys are resting after a rate limit, try again in a few seconds"
+			return nil, "All keys are resting after a rate limit, back in about " .. math.ceil(Keys.nextReady(role)) .. " s"
+		end
+		-- keys that are still inside their spacing go last; if all of them are, wait a moment for the nearest one
+		local ready, later = {}, {}
+		for _, i in ipairs(order) do
+			local w = paceWait(i)
+			if w <= 0 then
+				ready[#ready + 1] = i
+			else
+				later[#later + 1] = { i, w }
+			end
+		end
+		table.sort(later, function(a, b)
+			return a[2] < b[2]
+		end)
+		if #ready == 0 then
+			local nearest = later[1]
+			if nearest[2] > (tonumber(cfg.MaxPaceWait) or 6) then
+				return nil, "Going easy on the keys so they do not get rate limited, ready in " .. math.ceil(nearest[2]) .. " s"
+			end
+			task.wait(nearest[2])
+		end
+		local seq = {}
+		for _, i in ipairs(ready) do
+			seq[#seq + 1] = i
+		end
+		for _, l in ipairs(later) do
+			seq[#seq + 1] = l[1]
 		end
 		local lastErr
-		for n, i in ipairs(order) do
-			local text, err = callSlot(i, messages, maxTokens, keep)
-			if text then
-				Keys.last[role] = i
-				if n > 1 then
-					status("Key " .. i .. " helped out (" .. tostring(lastErr) .. ")")
+		for n, i in ipairs(seq) do
+			if Keys.slotLeft(i) <= 0 then -- another thread may have limited it while this one waited
+				local text, err = callSlot(i, messages, maxTokens, keep)
+				if text then
+					Keys.last[role] = i
+					if n > 1 then
+						status("Key " .. i .. " helped out (" .. tostring(lastErr) .. ")")
+					end
+					return text
 				end
-				return text
+				lastErr = err
 			end
-			lastErr = err
 		end
-		return nil, lastErr
+		return nil, lastErr or "All keys are resting after a rate limit"
 	end
 
 	-- models that are not chat models (safety classifiers, speech, images...): they answer with labels like "user safe", never chat
@@ -2330,6 +2762,7 @@ do
 				end
 			end
 			s.model = pick or list[1]
+			s.home = s.model
 		end
 		saveCfg()
 		return true, #list .. " models, using " .. s.model, fresh
@@ -3424,7 +3857,7 @@ end
 					while top.Parent and top.Parent ~= workspace do
 						top = top.Parent
 					end
-					if not playerOf(top) and not World.isOwn(top) then
+					if not playerOf(top) and not World.isOwn(top) and not World.isOwn(part) then
 						local g = groups[top]
 						local d = (part.Position - myPos).Magnitude
 						if not g then
@@ -4335,7 +4768,7 @@ end
 			if (cfg.WorldSight or cfg.WorldHear) and Core.on() then
 				World.start()
 				pcall(tick)
-				if cfg.WorldSight and not learning and #Keys.active() > 0 then
+				if cfg.WorldSight and not learning and #Keys.active() > 0 and Keys.pressure() < 2 then
 					loadNotes()
 					local due = (Notes.at == nil and os.clock() > 10) or (W.idx.count - math.min(Notes.evs or 0, W.idx.count) >= 25 and os.time() - (Notes.at or 0) > 300)
 					if due then
@@ -4346,7 +4779,7 @@ end
 						end)
 					end
 				end
-				if #Keys.active() > 0 and not reflecting then
+				if #Keys.active() > 0 and not reflecting and Keys.pressure() < 2 then
 					loadLessons()
 					if W.idx.count - math.min(Lessons.evs, W.idx.count) >= 15 and os.time() - Lessons.at > 90 then
 						reflecting = true
@@ -5333,6 +5766,11 @@ end
 					end
 				end
 			end
+			if not found and Brain.Gear then
+				-- "weapon", "light", "key", "pickaxe"...: the tool that is for that
+				local okf, t = pcall(Brain.Gear.find, want)
+				found = okf and t or nil
+			end
 			if not found then
 				return "no tool called " .. want
 			end
@@ -5905,7 +6343,7 @@ The program itself blocks purchase prompts and anything that costs Robux, so do 
 		local list = {}
 		for _, t in ipairs(M.targets(true)) do
 			local label = tostring(t.label)
-			if t.kind ~= "player" and not (M.riskyText(label) or autoRiskyText(label)) then
+			if t.kind ~= "player" and not (M.riskyText(label) or autoRiskyText(label)) and not (t.pos and t.kind ~= "button" and t.kind ~= "core" and Brain.Vision and not Brain.Vision.ok(t.pos)) then
 				local k = ekey(t)
 				local ex = Explored[k]
 				local n = ex and ex.n or 0
@@ -7342,7 +7780,7 @@ end
 	local function newKnow()
 		-- moves: what its body can do here; safe: which way of escaping worked against what; skills: what each skill does; spots: safe places it found;
 		-- acts: cause and effect it learned or was told: what pressing a button / collecting / fighting something does, and how often it worked
-		return { summary = "", objective = "", mechanics = {}, threats = {}, prey = {}, collect = {}, hazards = {}, goals = {}, tips = {}, gui = {}, acts = {}, places = {}, moves = {}, safe = {}, skills = {}, spots = {} }
+		return { summary = "", objective = "", mechanics = {}, threats = {}, prey = {}, collect = {}, hazards = {}, goals = {}, tips = {}, gui = {}, acts = {}, places = {}, moves = {}, safe = {}, skills = {}, spots = {}, killers = {}, gear = {} }
 	end
 	local function fix(g)
 		g.name = tostring(g.name or "Game")
@@ -8617,6 +9055,9 @@ end)()
 				return hit, w
 			end
 		end
+		if Brain.Killers and Brain.Killers.matches(hit.Instance) then
+			return hit, "kill brick"
+		end
 		if hit.Material == Enum.Material.Water then
 			return hit, "water"
 		end
@@ -8638,6 +9079,9 @@ end)()
 			if w ~= "" and nm:find(w, 1, true) then
 				return w
 			end
+		end
+		if Brain.Killers and Brain.Killers.matches(hit.Instance) then
+			return "kill brick"
 		end
 		if hit.Material == Enum.Material.Water then
 			return "water"
@@ -8794,6 +9238,14 @@ end)()
 			end
 			return a.name < b.name
 		end)
+		-- loot behind a wall or on a ledge it cannot climb is not worth listing: it would walk at it forever
+		if Brain.Vision and cfg.Sight ~= false then
+			for i = #out, 1, -1 do
+				if not Brain.Vision.ok(out[i].pos) then
+					table.remove(out, i)
+				end
+			end
+		end
 		while #out > 6 do
 			table.remove(out)
 		end
@@ -8880,6 +9332,11 @@ end)()
 						end
 						if (t.kind == "button" or t.kind == "core") and t.x then
 							s2 = s2 .. " at (" .. r0(t.x) .. "," .. r0(t.y) .. ")"
+						elseif t.pos and Brain.Vision and cfg.Sight ~= false then
+							local why = Brain.Vision.whyOf(t.pos)
+							if why then
+								s2 = s2 .. " (cannot reach: " .. why .. ")"
+							end
 						end
 						b[#b + 1] = s2
 						if #b >= 7 then
@@ -9246,6 +9703,7 @@ end)()
 	local function cell(pos)
 		return math.floor(pos.X / 24) .. ":" .. math.floor(pos.Z / 24)
 	end
+	Body.cell = cell
 	function Body.mark()
 		local _, root = parts()
 		if root then
@@ -9454,6 +9912,20 @@ end)()
 		end
 		Body.carrying = o.item and { pos = o.item.pos or dest, name = o.item.name or label, at = os.clock() } or nil
 		local within, timeout = o.within or 4, o.timeout or 30
+		local d0 = flat(root.Position, dest)
+		if Brain.Vision and o.avoid ~= false and o.noCheck ~= true then
+			-- look at the map first: a place behind a wall or too high to climb is not walked at
+			local v = Brain.Vision.check(dest, { within = within, label = label, mark = true })
+			if v and v.ok == false then
+				Body.lastWhy = v.why
+				Body.carrying = nil
+				Body.now = ""
+				Body.reason(("Not going to %s: it is %s"):format(label, v.why or "out of reach"))
+				Brain.Vision.stats.skipped = Brain.Vision.stats.skipped + 1
+				return "unreachable"
+			end
+		end
+		Body.lastWhy = nil
 		local t0 = os.clock()
 		local wps, wi, repaths, fails = nil, 1, 0, 0
 		local lastPos, stuckT, stage, sideDir = root.Position, 0, 0, 1
@@ -9706,15 +10178,27 @@ end)()
 				end
 			end
 		end
+		if Brain.Vision then
+			local _, rN = parts()
+			if result == "arrived" then
+				Brain.Vision.arrived(dest)
+			elseif rN then
+				Brain.Vision.fail(dest, result, d0, flat(rN.Position, dest), label)
+			end
+		end
 		return result
 	end
 
 	-- pick a weapon (or the first tool) and hold it
 	local WEAPONS = { "sword", "blade", "katana", "knife", "dagger", "axe", "bat", "club", "hammer", "mace", "spear", "staff", "wand", "bow", "gun", "pistol", "rifle", "weapon", "gauntlet", "fist", "glove", "pickaxe" }
-	function Body.equipWeapon(prefer)
+	function Body.equipWeapon(prefer, dist)
 		local char, _, hum = parts()
 		if not (char and hum) then
 			return nil
+		end
+		if Brain.Gear and cfg.SmartGear ~= false then
+			-- the right tool for this fight (sword up close, bow far away); nothing to hit with = bare hands
+			return Brain.Gear.fight(prefer, dist)
 		end
 		local cur = char:FindFirstChildOfClass("Tool")
 		if cur then
@@ -9770,10 +10254,16 @@ end)()
 		Body.now = "fighting " .. name
 		Body.reason(("Fighting %s%s"):format(name, o.why and (": " .. o.why) or ""))
 		local th = model and model:FindFirstChildOfClass("Humanoid")
-		local tool = Body.equipWeapon(o.weapon)
+		local d00 = nil
+		do
+			local tr0 = model and (model:FindFirstChild("HumanoidRootPart") or model.PrimaryPart or model:FindFirstChildWhichIsA("BasePart"))
+			d00 = tr0 and flat(root.Position, tr0.Position) or nil
+		end
+		local tool = Body.equipWeapon(o.weapon, d00)
 		local t0, hits, swings = os.clock(), 0, 0
 		local lastHp = th and th.Health
-		local range = o.range or 6.5
+		local range = o.range or (Brain.Gear and Brain.Gear.rangeOf(tool)) or 6.5
+		local lastGear = os.clock()
 		local result = "timeout"
 		local lastSwing = 0
 		local sc = World.screenSize and World.screenSize()
@@ -9810,10 +10300,32 @@ end)()
 				result = "retreat"
 				break
 			end
+			if Brain.Gear and cfg.SmartGear ~= false and os.clock() - lastGear > 1.2 then
+				-- the distance changed: the bow far away, the sword up close
+				lastGear = os.clock()
+				tool = Brain.Gear.fight(o.weapon, d) or char:FindFirstChildOfClass("Tool") or tool
+				range = o.range or Brain.Gear.rangeOf(tool) or 6.5
+			end
 			local hold = Brain.Skills and cfg.UseSkills ~= false and Brain.Skills.standoff and Brain.Skills.standoff() or nil
+			local gh = Brain.Gear and Brain.Gear.standoff(tool) or nil
+			if gh and (not hold or gh > hold) then
+				hold = gh
+			end
+			local routed = false
+			if not (hold and d <= hold) and (d > range + 1.5 or gh) and Brain.Vision and cfg.Sight ~= false and not Brain.Vision.straight(root.Position, tr.Position, model) then
+				-- a wall or a ledge between us: go around it like a player, never push against it
+				local r, why = Brain.Vision.stepToward(tok, tr.Position, { within = range, timeout = 2.2 })
+				if r == "unreachable" then
+					Brain.Vision.mark(tr.Position, why, name, 20)
+					Body.lastWhy = why
+					result = "unreachable"
+					break
+				end
+				routed = r ~= "none"
+			end
 			if hold and d <= hold then
 				pcall(Legs.halt, hum, root) -- a ranged skill is doing the work from here
-			else
+			elseif not routed then
 				Legs.moveTo(hum, tr.Position)
 			end
 			if Brain.Skills and cfg.UseSkills ~= false and os.clock() - lastSkill > 0.8 then
@@ -9826,6 +10338,9 @@ end)()
 				swings = swings + 1
 				tool = char:FindFirstChildOfClass("Tool") or tool
 				if tool then
+					if gh and Brain.Gear then
+						pcall(Brain.Gear.aim, tr.Position)
+					end
 					pcall(function()
 						tool:Activate()
 					end)
@@ -9835,6 +10350,9 @@ end)()
 				task.wait(0.12)
 				if th and lastHp and th.Health < lastHp then
 					hits = hits + 1
+				end
+				if Brain.Gear and tool and tool.Parent == char then
+					pcall(Brain.Gear.learnSwing, tool, (th and lastHp and th.Health < lastHp) and (lastHp - th.Health) or 0, d)
 				end
 				lastHp = th and th.Health or lastHp
 			end
@@ -9873,6 +10391,13 @@ end)()
 		local char, root = parts()
 		if not root then
 			return nil
+		end
+		if Brain.Vision and cfg.Sight ~= false then
+			-- only places the map says it can walk to
+			local v = Brain.Vision.pickExplore()
+			if v then
+				return v
+			end
 		end
 		local rp = rparams(char)
 		local best, bs
@@ -10153,6 +10678,9 @@ end)()
 				end
 			end
 		end
+		if Brain.Killers then
+			pcall(Brain.Killers.markGrid, G)
+		end
 		Terrain.G = G
 		return G
 	end
@@ -10346,7 +10874,7 @@ end)()
 														local fits = false
 														for ly = 0, 1 do
 															local h2 = G.h[oi + ly]
-															if h2 and (math.abs(h2 - ha) <= c.step or math.abs(h2 - hb) <= c.step) then
+															if h2 and not (G.z[oi + ly] and G.z[oi + ly] ~= "water") and (math.abs(h2 - ha) <= c.step or math.abs(h2 - hb) <= c.step) then
 																fits = true
 															end
 														end
@@ -10519,6 +11047,13 @@ end)()
 				end
 			end
 		end
+		if Brain.Killers then
+			-- a kill brick in the way (even one that is not solid): never walk into it
+			local kz = Brain.Killers.ahead(base, fwd, math.min(maxD, 8), feet)
+			if kz and (not nearest or kz.d < nearest) then
+				return kz
+			end
+		end
 		if nearest then
 			-- how high is the thing: find its top just behind the face
 			local probe = base + fwd * (nearest + 0.7)
@@ -10624,6 +11159,10 @@ end)()
 					end
 				end
 			elseif info.d < stopD then
+				result = "blocked"
+			end
+		elseif info.kind == "hazard" then
+			if info.d < stopD then
 				result = "blocked"
 			end
 		elseif info.kind == "wall" then
@@ -10897,6 +11436,889 @@ end)()
 	track(lp.CharacterAdded:Connect(function()
 		Terrain.reset()
 	end))
+end)()
+------------------------------------------------------------------ sight: what it can see, what it can actually get to, and what is only on the other side of a wall
+;(function()
+	local Vision = { bad = {}, fails = {}, stats = { checks = 0, blocked = 0, marked = 0, skipped = 0 } }
+	Brain.Vision = Vision
+	local Terrain, Body, Games = Brain.Terrain, Brain.Body, Brain.Games
+
+	local function parts()
+		local c = lp.Character
+		return c, c and c:FindFirstChild("HumanoidRootPart"), c and c:FindFirstChildOfClass("Humanoid")
+	end
+	local function flat(a, b)
+		return math.sqrt((a.X - b.X) ^ 2 + (a.Z - b.Z) ^ 2)
+	end
+	local function rparams(extra)
+		local rp = RaycastParams.new()
+		rp.FilterType = Enum.RaycastFilterType.Exclude
+		local list = { lp.Character }
+		for _, e in ipairs(extra or {}) do
+			list[#list + 1] = e
+		end
+		rp.FilterDescendantsInstances = list
+		pcall(function()
+			rp.RespectCanCollide = true
+		end)
+		return rp
+	end
+	local function ray(from, dir, rp)
+		local ok, hit = pcall(function()
+			return workspace:Raycast(from, dir, rp)
+		end)
+		return ok and hit or nil
+	end
+	local function on()
+		return cfg.Sight ~= false and Terrain ~= nil
+	end
+
+	------------------------------------------------------------ a straight look: is anything solid between its eyes and a point?
+	-- returns true when it can see the point, or false and the thing that is in the way
+	function Vision.los(from, to, ignore)
+		local hit = ray(from, to - from, rparams(ignore))
+		if not hit or not hit.Instance then
+			return true
+		end
+		if (hit.Position - to).Magnitude < 1.8 then
+			return true
+		end
+		return false, hit.Instance
+	end
+	-- from its head to something (a creature, a part or a point), ignoring the thing itself
+	function Vision.straight(from, to, target)
+		local ign = {}
+		if typeof(target) == "Instance" then
+			ign[1] = target
+		end
+		local ok = Vision.los(from + Vector3.new(0, 1.5, 0), to, ign)
+		return ok
+	end
+
+	------------------------------------------------------------ one search over the map it sees, shared by every question asked in the next few seconds
+	local field
+	local function getField()
+		local _, root, hum = parts()
+		if not (root and hum) then
+			return nil
+		end
+		local G = Terrain.grid(2.5)
+		if not G then
+			return nil
+		end
+		if field and field.G == G and os.clock() - field.t < 3 and flat(field.pos, root.Position) < 4 then
+			return field
+		end
+		local feet = Terrain.feetOf(root, hum)
+		local me = Terrain.nodeNear(G, root.Position.X, root.Position.Z, feet)
+		if not me then
+			return nil
+		end
+		local res = Terrain.search(G, me, { jump = cfg.Parkour ~= false })
+		field = { res = res, G = G, me = me, t = os.clock(), pos = root.Position }
+		return field
+	end
+	function Vision.reset()
+		field = nil
+	end
+
+	------------------------------------------------------------ places it learned it cannot get to
+	local function keyOf(pos)
+		return math.floor(pos.X / 6) .. ":" .. math.floor(pos.Z / 6)
+	end
+	-- the record for a spot (still resting), or nil. any = also records that ran out (to count how often it failed)
+	function Vision.isBad(pos, radius, any)
+		radius = radius or 6
+		local now = os.clock()
+		for _, r in ipairs(Vision.bad) do
+			if (any or r.t > now) and math.sqrt((r.x - pos.X) ^ 2 + (r.z - pos.Z) ^ 2) <= radius and math.abs((r.y or pos.Y) - pos.Y) < 25 then
+				return r
+			end
+		end
+		return nil
+	end
+	function Vision.mark(pos, why, name, base)
+		local now = os.clock()
+		local r = Vision.isBad(pos, 6, true)
+		if r then
+			r.n = r.n + 1
+			r.t = now + math.min(900, (base or 45) * 2 ^ (r.n - 1))
+			r.why, r.name = why or r.why, name or r.name
+		else
+			Vision.bad[#Vision.bad + 1] = { x = pos.X, y = pos.Y, z = pos.Z, n = 1, t = now + (base or 45), why = why or "cannot get there", name = name }
+			while #Vision.bad > 40 do
+				table.remove(Vision.bad, 1)
+			end
+			r = Vision.bad[#Vision.bad]
+		end
+		Vision.stats.marked = Vision.stats.marked + 1
+		if Brain.Camera then
+			pcall(Brain.Camera.look, pos, "I cannot get there", 1.4, 2)
+		end
+		return r
+	end
+	function Vision.clear(pos)
+		for i = #Vision.bad, 1, -1 do
+			local r = Vision.bad[i]
+			if math.sqrt((r.x - pos.X) ^ 2 + (r.z - pos.Z) ^ 2) <= 6 then
+				table.remove(Vision.bad, i)
+			end
+		end
+		Vision.fails[keyOf(pos)] = nil
+	end
+
+	------------------------------------------------------------ why a place cannot be reached
+	local function whyNot(dest, f, nearNode)
+		local G = f.G
+		local caps = Terrain.caps()
+		local feetDest = dest.Y - 3
+		local p = nearNode and Terrain.posOf(G, nearNode)
+		if p and feetDest - p.Y > caps.Hsafe + 1.5 then
+			return "too high to climb"
+		end
+		local n = Terrain.nodeOf(G, dest.X, dest.Z, feetDest)
+		if n and G.z[n] and G.z[n] ~= "water" then
+			return "on dangerous ground (" .. tostring(G.z[n]) .. ")"
+		end
+		local _, root = parts()
+		if root then
+			local hit = ray(root.Position + Vector3.new(0, 1, 0), dest - root.Position, rparams())
+			if hit and hit.Instance and (hit.Position - dest).Magnitude > 2.5 then
+				return "behind a wall"
+			end
+		end
+		return "no way across (gap, water or a drop)"
+	end
+
+	-- can it get to this world point? { ok = true | false | nil (do not know), why, gap }
+	-- o: { within = how close is close enough, mark = true to remember a no }
+	function Vision.check(dest, o)
+		o = o or {}
+		local _, root = parts()
+		if not root then
+			return { ok = nil }
+		end
+		Vision.stats.checks = Vision.stats.checks + 1
+		local rec = Vision.isBad(dest)
+		if rec then
+			return { ok = false, why = rec.why, known = true, secs = rec.t - os.clock() }
+		end
+		if not on() then
+			return { ok = nil }
+		end
+		local within = o.within or 4
+		if flat(root.Position, dest) <= within + 1 and math.abs(root.Position.Y - dest.Y) < 8 then
+			return { ok = true, near = true }
+		end
+		local f = getField()
+		if not f then
+			return { ok = nil }
+		end
+		local G = f.G
+		local half = (G.N - 1) * G.S / 2
+		if flat(root.Position, dest) > half - 4 then
+			return { ok = nil, far = true } -- beyond the map it sees: it walks toward it and learns on the way
+		end
+		local goal = Terrain.nodeOf(G, dest.X, dest.Z, dest.Y - 3)
+		if goal and f.res.cost[goal] then
+			return { ok = true, cost = f.res.cost[goal] }
+		end
+		-- not on the reachable ground: how close does the reachable ground get?
+		local best, bg
+		for n in pairs(f.res.cost) do
+			local p = Terrain.posOf(G, n)
+			local dy = math.abs(p.Y - (dest.Y - 3))
+			local g = flat(p, dest) + math.max(0, dy - 3.5)
+			if not bg or g < bg then
+				best, bg = n, g
+			end
+		end
+		if best and bg <= within + G.S then
+			return { ok = true, gap = bg, close = true }
+		end
+		local why = whyNot(dest, f, best)
+		Vision.stats.blocked = Vision.stats.blocked + 1
+		if o.mark then
+			Vision.mark(dest, why, o.label, 30)
+		end
+		return { ok = false, why = why, gap = bg }
+	end
+
+	------------------------------------------------------------ cheap yes/no for lists (cached for a few seconds)
+	local cache, ccount = {}, 0
+	function Vision.reachable(pos, within)
+		if not pos then
+			return nil
+		end
+		local _, root = parts()
+		if not root then
+			return nil
+		end
+		local k = math.floor(pos.X / 5) .. ":" .. math.floor(pos.Z / 5) .. ":" .. math.floor(pos.Y / 6) .. "|" .. math.floor(root.Position.X / 8) .. ":" .. math.floor(root.Position.Z / 8)
+		local c = cache[k]
+		if c and os.clock() - c.t < 4 then
+			return c.ok, c.why
+		end
+		local v = Vision.check(pos, { within = within or 4 })
+		ccount = ccount + 1
+		if ccount > 300 then
+			cache, ccount = {}, 0
+		end
+		cache[k] = { ok = v.ok, why = v.why, t = os.clock() }
+		return v.ok, v.why
+	end
+	-- true unless it knows it cannot get there
+	function Vision.ok(pos)
+		if cfg.Sight == false then
+			return true
+		end
+		return Vision.reachable(pos) ~= false
+	end
+	function Vision.whyOf(pos)
+		local ok, why = Vision.reachable(pos)
+		return ok == false and (why or "cannot reach") or nil
+	end
+
+	------------------------------------------------------------ it walked and did not get there
+	-- res: how the walk ended, d0 / d1: distance at the start and at the end
+	function Vision.fail(dest, res, d0, d1, label)
+		if res ~= "stuck" and res ~= "timeout" then
+			return
+		end
+		local k = keyOf(dest)
+		local f = Vision.fails[k] or { n = 0 }
+		Vision.fails[k] = f
+		f.n = f.n + 1
+		-- "stuck" means it stopped getting closer; a timeout while still getting closer is only a long way
+		local gaveUp = res == "stuck" or d1 > d0 * 0.8
+		if gaveUp or f.n >= 3 then
+			Vision.mark(dest, "I walked there and could not get close", label, 60)
+			f.n = 0
+		end
+	end
+	function Vision.arrived(dest)
+		Vision.clear(dest)
+	end
+
+	------------------------------------------------------------ going toward something that is not straight ahead (around walls, over ledges)
+	-- one leg of the route to a point. returns "moved", "arrived", "unreachable", "stuck", "interrupted" ...
+	function Vision.stepToward(tok, dest, o)
+		o = o or {}
+		if not on() then
+			return "none"
+		end
+		local v = Vision.check(dest, { within = o.within or 4 })
+		if v.ok == false then
+			return "unreachable", v.why
+		end
+		local rt = Terrain.route(dest, {})
+		if not rt or #rt < 2 then
+			return "none"
+		end
+		return Terrain.follow(rt, tok, { timeout = o.timeout or 2.5, abort = o.abort })
+	end
+
+	------------------------------------------------------------ exploring only where the map says it can go
+	function Vision.pickExplore()
+		if not on() then
+			return nil
+		end
+		local f = getField()
+		if not f then
+			return nil
+		end
+		local _, root = parts()
+		if not root then
+			return nil
+		end
+		local G = f.G
+		local threats = (Brain.Threat and Brain.Threat.list) or {}
+		local best, bs
+		for n, cst in pairs(f.res.cost) do
+			local p = Terrain.posOf(G, n)
+			local d = flat(p, root.Position)
+			if d >= 14 and not G.z[n] then
+				local ok = true
+				for _, th in ipairs(threats) do
+					if flat(p, th.pos) < 30 then
+						ok = false
+						break
+					end
+				end
+				if ok and not Vision.isBad(p, 8) then
+					local vis = Body.visited[Body.cell(p)] or 0
+					local sc = (vis == 0 and 3 or -vis * 0.4) + math.min(d, 40) / 18 - cst * 0.02 + math.random() * 0.8
+					if not bs or sc > bs then
+						best, bs = n, sc
+					end
+				end
+			end
+		end
+		if not best then
+			return nil
+		end
+		local p = Terrain.posOf(G, best)
+		return Vector3.new(p.X, p.Y + 3, p.Z)
+	end
+
+	------------------------------------------------------------ what the planner is told
+	function Vision.text()
+		local now = os.clock()
+		local L = {}
+		for i = #Vision.bad, 1, -1 do
+			local r = Vision.bad[i]
+			if r.t <= now - 1200 then
+				table.remove(Vision.bad, i)
+			end
+		end
+		for i = #Vision.bad, 1, -1 do
+			local r = Vision.bad[i]
+			if r.t > now and #L < 5 then
+				L[#L + 1] = ("%s (%s)"):format(r.name or "a spot", r.why)
+			end
+		end
+		if #L == 0 then
+			return ""
+		end
+		return "CANNOT REACH right now, do not walk there: " .. table.concat(L, "; ")
+	end
+	function Vision.summary()
+		local n = 0
+		local now = os.clock()
+		for _, r in ipairs(Vision.bad) do
+			if r.t > now then
+				n = n + 1
+			end
+		end
+		return ("%d places it cannot reach right now, %d checks, %d blocked"):format(n, Vision.stats.checks, Vision.stats.blocked)
+	end
+
+	track(lp.CharacterAdded:Connect(function()
+		Vision.reset()
+	end))
+end)()
+------------------------------------------------------------------ kill bricks: it notices what hurts when touched, writes it in the game file, and keeps away from it
+;(function()
+	local Killers = { stats = { learned = 0, hurts = 0, dodges = 0, forgiven = 0 }, safe = {}, hurt = {}, ring = {}, near = {}, nearAt = 0, index = nil, log = {} }
+	Brain.Killers = Killers
+	local Games, Body, Terrain, Sense = Brain.Games, Brain.Body, Brain.Terrain, Brain.Sense
+	local Legs = Core.Legs
+
+	local function parts()
+		local c = lp.Character
+		return c, c and c:FindFirstChild("HumanoidRootPart"), c and c:FindFirstChildOfClass("Humanoid")
+	end
+	local function flat(a, b)
+		return math.sqrt((a.X - b.X) ^ 2 + (a.Z - b.Z) ^ 2)
+	end
+	local function on()
+		return cfg.LearnKillers ~= false and Core.on()
+	end
+
+	------------------------------------------------------------ what a kill brick looks like: its name, colour and material (all parts that look the same are the same kind)
+	local NAMEWORDS = { "kill", "lava", "death", "acid", "spike", "poison", "magma", "laser", "toxic", "damage", "hurt", "deadly" }
+	local SKIPNAME = { "spawn", "baseplate", "floor", "ground", "terrain", "grass", "road", "sidewalk", "water" }
+	local function hasWord(nm, w)
+		return ("." .. nm):find("[^%a]" .. w) ~= nil
+	end
+	local sigCache = setmetatable({}, { __mode = "k" })
+	local function sigOf(part)
+		local s = sigCache[part]
+		if s then
+			return s
+		end
+		local ok, v = pcall(function()
+			local c = part.Color
+			local nm = (part.Name:lower():gsub("[%s_%-]*%d+$", ""))
+			return nm .. "|" .. string.format("%02x%02x%02x", math.floor(c.R * 255 + 0.5), math.floor(c.G * 255 + 0.5), math.floor(c.B * 255 + 0.5)) .. "|" .. tostring(part.Material)
+		end)
+		if ok and v then
+			sigCache[part] = v
+			return v
+		end
+		return nil
+	end
+	local function isBig(part)
+		local ok, big = pcall(function()
+			return part.Size.X * part.Size.Z > 1600
+		end)
+		return ok and big
+	end
+	local function skipName(part)
+		local ok, nm = pcall(function()
+			return part.Name:lower()
+		end)
+		if not ok then
+			return true
+		end
+		for _, w in ipairs(SKIPNAME) do
+			if nm:find(w, 1, true) then
+				return true
+			end
+		end
+		return false
+	end
+
+	------------------------------------------------------------ the list in the game file
+	local loadedFor
+	Killers.ver = 0
+	local function reload(force)
+		local id = Games.currentId and Games.currentId() or nil
+		if not force and loadedFor == id and Killers.index then
+			return
+		end
+		loadedFor = id
+		Killers.ver = Killers.ver + 1
+		Killers.index = {}
+		local g = Games.cur(false)
+		if g and type(g.know.killers) == "table" then
+			for _, r in ipairs(g.know.killers) do
+				if type(r) == "table" and r.sig then
+					Killers.index[r.sig] = r
+				end
+			end
+		end
+	end
+	function Killers.list()
+		local g = Games.cur(false)
+		return g and g.know.killers or {}
+	end
+	-- the record for a part that is a kill brick (learned, or named like one), or nil
+	local matchCache = setmetatable({}, { __mode = "k" })
+	function Killers.matches(inst)
+		if not inst or cfg.LearnKillers == false then
+			return nil
+		end
+		reload()
+		local c = matchCache[inst]
+		if c and c.v == Killers.ver then
+			return c.r or nil
+		end
+		local s = sigOf(inst)
+		local rec = s and Killers.index[s]
+		if not rec then
+			local ok, nm = pcall(function()
+				return inst.Name:lower()
+			end)
+			if ok then
+				for _, w in ipairs(NAMEWORDS) do
+					if hasWord(nm, w) then
+						rec = { sig = s, name = inst.Name, byName = true, n = 0 }
+						break
+					end
+				end
+			end
+		end
+		matchCache[inst] = { v = Killers.ver, r = rec or false }
+		return rec
+	end
+	function Killers.learn(part, why, lethal)
+		local s = sigOf(part)
+		if not s then
+			return nil
+		end
+		reload()
+		local g = Games.cur()
+		if not g then
+			return nil
+		end
+		local rec = Killers.index[s]
+		if rec then
+			rec.n = (rec.n or 1) + 1
+			rec.t = os.time()
+			rec.ok = 0
+			Games.save()
+			return rec, false
+		end
+		local nm = tostring(part.Name)
+		rec = { sig = s, name = nm, n = 1, t = os.time(), why = why or "it hurt me when I touched it", lethal = lethal and true or false, ok = 0 }
+		g.know.killers[#g.know.killers + 1] = rec
+		while #g.know.killers > 30 do
+			table.remove(g.know.killers, 1)
+		end
+		reload(true)
+		Killers.stats.learned = Killers.stats.learned + 1
+		Games.save()
+		pcall(Games.addTo, "mechanics", ("Parts like %s (colour and material the same) hurt or kill when touched: never step on them"):format(nm), 40)
+		pcall(World.lesson, ("%s hurts when I touch it, so I go around it"):format(nm))
+		if Brain.Camera then
+			pcall(Brain.Camera.look, part, "that hurt me: " .. nm, 1.6, 3)
+		end
+		if Brain.Pilot and Brain.Pilot.say then
+			Brain.Pilot.say(("Learned: %s hurts when touched. I will go around it."):format(nm))
+		end
+		if Terrain then
+			Terrain.G = nil -- draw the map again with this danger on it
+		end
+		if Brain.Vision then
+			Brain.Vision.reset()
+		end
+		return rec, true
+	end
+	function Killers.forget()
+		local g = Games.cur(false)
+		if g then
+			g.know.killers = {}
+			Games.save()
+		end
+		Killers.index, Killers.safe, Killers.hurt, Killers.ring = {}, {}, {}, {}
+		if Terrain then
+			Terrain.G = nil
+		end
+	end
+
+	------------------------------------------------------------ what it is touching (and how long it was safe there)
+	-- the nearest distance from a point to a part (axis aligned, close enough for bricks)
+	local function distTo(part, p)
+		local ok, d = pcall(function()
+			local pos, size = part.Position, part.Size
+			local dx = math.max(math.abs(p.X - pos.X) - size.X / 2, 0)
+			local dy = math.max(math.abs(p.Y - pos.Y) - size.Y / 2, 0)
+			local dz = math.max(math.abs(p.Z - pos.Z) - size.Z / 2, 0)
+			return math.sqrt(dx * dx + dy * dy + dz * dz)
+		end)
+		return ok and d or 99
+	end
+	local function isBeing(part)
+		local m = part:FindFirstAncestorOfClass("Model")
+		return m ~= nil and m:FindFirstChildOfClass("Humanoid") ~= nil
+	end
+	local function contacts(root)
+		local out, seen = {}, {}
+		local char = lp.Character
+		pcall(function()
+			local op = OverlapParams.new()
+			op.FilterType = Enum.RaycastFilterType.Exclude
+			op.FilterDescendantsInstances = { char }
+			op.MaxParts = 60
+			local pts = { root.Position + Vector3.new(0, 2, 0), root.Position, root.Position - Vector3.new(0, 2.6, 0) }
+			for _, part in ipairs(workspace:GetPartBoundsInRadius(root.Position, 5, op)) do
+				if part:IsA("BasePart") and part.CanTouch ~= false and not World.isOwn(part) and not isBeing(part) then
+					local d = 99
+					for _, p in ipairs(pts) do
+						d = math.min(d, distTo(part, p))
+					end
+					if d <= 1.6 then
+						local s = sigOf(part)
+						if s and not seen[s] then
+							seen[s] = true
+							out[#out + 1] = { sig = s, part = part, big = isBig(part) or skipName(part) }
+						end
+					end
+				end
+			end
+		end)
+		return out
+	end
+
+	local function creatureNear(root, r)
+		for _, e in ipairs(Sense.npcs(r)) do
+			return true
+		end
+		for _, p in ipairs(Players:GetPlayers()) do
+			local pr = p ~= lp and p.Character and p.Character:FindFirstChild("HumanoidRootPart")
+			if pr and (pr.Position - root.Position).Magnitude < r then
+				return true
+			end
+		end
+		return false
+	end
+
+	-- it lost health: if nothing alive was close, what it was touching is to blame (when it was a big hit, or it happened twice)
+	local function onHurt(drop, hp, maxhp, root)
+		Killers.stats.hurts = Killers.stats.hurts + 1
+		if creatureNear(root, 9) then
+			return
+		end
+		local now = os.clock()
+		local sus, seen = {}, {}
+		for _, snap in ipairs(Killers.ring) do
+			if now - snap.t <= 0.8 then
+				for _, c in ipairs(snap.list) do
+					if not seen[c.sig] then
+						seen[c.sig] = true
+						sus[#sus + 1] = c
+					end
+				end
+			end
+		end
+		local cands = {}
+		for _, c in ipairs(sus) do
+			if (Killers.safe[c.sig] or 0) < 3.0 and not c.big then
+				cands[#cands + 1] = c
+			end
+		end
+		local lethal = hp <= 0 or (maxhp > 0 and drop >= 0.5 * maxhp)
+		for _, c in ipairs(cands) do
+			Killers.hurt[c.sig] = (Killers.hurt[c.sig] or 0) + 1
+		end
+		for _, c in ipairs(cands) do
+			if (lethal and #cands <= 2) or (Killers.hurt[c.sig] or 0) >= 2 then
+				Killers.learn(c.part, "it hurt me when I touched it", lethal)
+			else
+				Killers.log[#Killers.log + 1] = "suspect " .. tostring(c.part.Name)
+			end
+		end
+	end
+
+	------------------------------------------------------------ the watcher
+	local lastHp, lastT
+	local function tick()
+		if not on() then
+			lastHp = nil
+			return
+		end
+		local char, root, hum = parts()
+		if not (root and hum) then
+			lastHp = nil
+			return
+		end
+		reload()
+		local now = os.clock()
+		local dt = lastT and math.min(now - lastT, 1) or 0
+		lastT = now
+		local hp = hum.Health
+		local list = contacts(root)
+		Killers.ring[#Killers.ring + 1] = { t = now, list = list }
+		while #Killers.ring > 8 do
+			table.remove(Killers.ring, 1)
+		end
+		local hurtNow = lastHp ~= nil and hp < lastHp - 0.5
+		if hurtNow then
+			pcall(onHurt, lastHp - hp, hp, hum.MaxHealth, root)
+		elseif lastHp == nil or hp >= lastHp - 0.01 then
+			for _, c in ipairs(list) do
+				Killers.safe[c.sig] = (Killers.safe[c.sig] or 0) + dt
+				-- a part it took for a killer that it stands on safely for a while was not the culprit
+				local rec = Killers.index and Killers.index[c.sig]
+				if rec and not rec.lethal then
+					rec.ok = (rec.ok or 0) + dt
+					if rec.ok >= 5 then
+						local g = Games.cur(false)
+						if g then
+							for i = #g.know.killers, 1, -1 do
+								if g.know.killers[i] == rec then
+									table.remove(g.know.killers, i)
+								end
+							end
+							reload(true)
+							Killers.hurt[c.sig] = 0
+							Killers.stats.forgiven = Killers.stats.forgiven + 1
+							Games.save()
+							if Terrain then
+								Terrain.G = nil
+							end
+						end
+					end
+				end
+			end
+		end
+		lastHp = hp
+	end
+	task.spawn(function()
+		while Alive do
+			task.wait(0.15)
+			pcall(tick)
+		end
+	end)
+	track(lp.CharacterAdded:Connect(function()
+		lastHp, lastT = nil, nil
+		Killers.ring = {}
+	end))
+
+	------------------------------------------------------------ keeping away: the map, the look ahead, and a dodge for things that move
+	-- the kill bricks near it (learned, or named like one), refreshed a few times a second
+	local function nearby(radius)
+		local now = os.clock()
+		if now - Killers.nearAt < 0.4 then
+			return Killers.near
+		end
+		Killers.nearAt = now
+		local out = {}
+		local _, root = parts()
+		if root and cfg.LearnKillers ~= false then
+			reload()
+			pcall(function()
+				local op = OverlapParams.new()
+				op.FilterType = Enum.RaycastFilterType.Exclude
+				op.FilterDescendantsInstances = { lp.Character }
+				op.MaxParts = 900
+				for _, part in ipairs(workspace:GetPartBoundsInRadius(root.Position, radius or 70, op)) do
+					if part:IsA("BasePart") and not World.isOwn(part) and not isBeing(part) and Killers.matches(part) then
+						out[#out + 1] = part
+					end
+				end
+			end)
+		end
+		Killers.near = out
+		return out
+	end
+	Killers.nearby = nearby
+
+	-- put them on the map: every cell a kill brick covers (and a body's width around it) becomes dangerous ground
+	function Killers.markGrid(G)
+		if cfg.LearnKillers == false or not G then
+			return
+		end
+		local list = nearby(Terrain and (G.N * G.S) * 0.75 or 70)
+		for _, part in ipairs(list) do
+			pcall(function()
+				local pos, size = part.Position, part.Size
+				-- a cell is dangerous when the brick reaches into the middle of it (its edges alone are not: a narrow strip stays narrow, so it can be jumped)
+				local pad, inner = 0.3, 0.5
+				local hx, hz, topY, botY = size.X / 2 + pad, size.Z / 2 + pad, pos.Y + size.Y / 2, pos.Y - size.Y / 2
+				local S = G.S
+				local i0 = math.floor((pos.X - hx) / S) - G.gx0
+				local i1 = math.floor((pos.X + hx) / S) - G.gx0
+				local j0 = math.floor((pos.Z - hz) / S) - G.gz0
+				local j1 = math.floor((pos.Z + hz) / S) - G.gz0
+				for j = math.max(0, j0), math.min(G.N - 1, j1) do
+					for i = math.max(0, i0), math.min(G.N - 1, i1) do
+						local cx, cz = (G.gx0 + i) * S + S / 2, (G.gz0 + j) * S + S / 2
+						local hits = (pos.X + hx > cx - S / 2 + inner) and (pos.X - hx < cx + S / 2 - inner) and (pos.Z + hz > cz - S / 2 + inner) and (pos.Z - hz < cz + S / 2 - inner)
+						if hits then
+							local idx = j * G.N + i
+							for layer = 0, 1 do
+								local n = idx * 2 + layer
+								local h = G.h[n]
+								-- the body stands on h and is about 5 tall: it touches the brick when the two overlap
+								if h and h <= topY + 0.7 and h + 5 >= botY - 0.2 then
+									G.z[n] = G.z[n] or "kill brick"
+								end
+							end
+						end
+					end
+				end
+			end)
+		end
+	end
+
+	-- straight ahead from a foot position: is there a kill brick in the way? (for Terrain.ahead)
+	function Killers.ahead(base, fwd, maxD, feet)
+		local best
+		for _, part in ipairs(nearby()) do
+			local ok = pcall(function()
+				local pos, size = part.Position, part.Size
+				local topY, botY = pos.Y + size.Y / 2, pos.Y - size.Y / 2
+				if topY < feet - 0.8 or botY > feet + 5 then
+					return
+				end
+				for k = 1, math.max(1, math.floor(maxD / 1.0)) do
+					local p = base + fwd * k
+					local dx = math.max(math.abs(p.X - pos.X) - size.X / 2, 0)
+					local dz = math.max(math.abs(p.Z - pos.Z) - size.Z / 2, 0)
+					if math.sqrt(dx * dx + dz * dz) < 1.4 then
+						if not best or k < best then
+							best = k
+						end
+						return
+					end
+				end
+			end)
+		end
+		if best then
+			return { kind = "hazard", d = math.max(0, best - 1.4), why = "kill brick", solid = true }
+		end
+		return nil
+	end
+
+	-- things that move (a sweeping bar, a spinner) are not on the map: watch them and step back before they arrive
+	local lastDodge = 0
+	local function guard()
+		if not on() or not Legs.can() then
+			return
+		end
+		if not ((Brain.Pilot and Brain.Pilot.active) or cfg.FreeWill or cfg.AutoPlay) then
+			return
+		end
+		local char, root, hum = parts()
+		if not (root and hum) or hum.Health <= 0 then
+			return
+		end
+		local now = os.clock()
+		if now - lastDodge < 0.35 then
+			return
+		end
+		local list = nearby()
+		if #list == 0 then
+			return
+		end
+		local feet = Terrain and Terrain.feetOf(root, hum) or root.Position.Y - 3
+		for _, part in ipairs(list) do
+			local moving = false
+			local ok, vel = pcall(function()
+				return part.AssemblyLinearVelocity
+			end)
+			local ang = 0
+			pcall(function()
+				ang = part.AssemblyAngularVelocity.Magnitude
+			end)
+			if ok and vel and (vel.Magnitude > 1.5 or ang > 0.4) then
+				moving = true
+			end
+			if moving then
+				local pos, size = part.Position, part.Size
+				local reach = (ang > 0.4) and (math.max(size.X, size.Z) / 2) or 0
+				local fut = pos + vel * 0.45
+				local topY, botY = pos.Y + size.Y / 2, pos.Y - size.Y / 2
+				if topY > feet - 0.5 and botY < feet + 5 then
+					local p2 = Vector3.new(root.Position.X, pos.Y, root.Position.Z)
+					local dx = math.max(math.abs(p2.X - fut.X) - size.X / 2 - reach * 0, 0)
+					local dz = math.max(math.abs(p2.Z - fut.Z) - size.Z / 2, 0)
+					local d = math.sqrt(dx * dx + dz * dz) - reach
+					local d0 = math.sqrt((root.Position.X - pos.X) ^ 2 + (root.Position.Z - pos.Z) ^ 2)
+					if d < 2.4 and d0 < 18 then
+						local away = Vector3.new(root.Position.X - fut.X, 0, root.Position.Z - fut.Z)
+						if away.Magnitude < 0.1 then
+							away = Vector3.new(-vel.X, 0, -vel.Z)
+						end
+						if away.Magnitude < 0.1 then
+							away = Vector3.new(1, 0, 0)
+						end
+						away = away.Unit
+						lastDodge = now
+						Killers.stats.dodges = Killers.stats.dodges + 1
+						if botY - feet > 1.5 and Terrain and Terrain.grounded(hum) == true and (topY - botY) < 4 and vel.Y <= 0.5 and (botY - feet) < Terrain.caps().Hsafe then
+							Legs.jump(hum)
+						end
+						Legs.moveTo(hum, root.Position + away * 7)
+						if Brain.Body then
+							Brain.Body.reason(("Stepping away from %s, it hurts and it is moving"):format(tostring(part.Name)))
+						end
+						return
+					end
+				end
+			end
+		end
+	end
+	task.spawn(function()
+		while Alive do
+			task.wait(0.1)
+			pcall(guard)
+		end
+	end)
+
+	------------------------------------------------------------ for the planner and the Play tab
+	function Killers.text()
+		reload()
+		local g = Games.cur(false)
+		if not g or #g.know.killers == 0 then
+			return ""
+		end
+		local b = {}
+		for i = #g.know.killers, 1, -1 do
+			local r = g.know.killers[i]
+			if #b < 4 then
+				b[#b + 1] = ("%s (hurt me %d time%s)"):format(r.name or "a brick", r.n or 1, (r.n or 1) == 1 and "" or "s")
+			end
+		end
+		return "KILL BRICKS you learned (parts that hurt when touched, the map already avoids them): " .. table.concat(b, ", ")
+	end
+	function Killers.summary()
+		local g = Games.cur(false)
+		local n = g and #g.know.killers or 0
+		return ("%d kinds of kill brick learned, %d dodges"):format(n, Killers.stats.dodges)
+	end
 end)()
 ------------------------------------------------------------------ survive: how it gets away from danger (run, climb, hide, grab the coin first) and what it learns from each try
 ;(function()
@@ -12087,7 +13509,7 @@ end)()
 			visit[#visit + 1] = { pat = t, p = table.concat(t.words or {}, " ") }
 		end
 		for _, t in ipairs((#want > 0 or #visit > 0) and M.targets(true) or {}) do
-			if (t.kind == "prompt" or t.kind == "click") and t.pos and t.dist and t.dist < 70 then
+			if (t.kind == "prompt" or t.kind == "click") and t.pos and t.dist and t.dist < 70 and (not Brain.Vision or Brain.Vision.ok(t.pos)) then
 				local set = Games.tokenize(t.label)
 				local known = Games.matchList(want, set) ~= nil or Games.matchList(visit, set) ~= nil
 				local key = "interact:" .. norm(t.label)
@@ -12102,7 +13524,7 @@ end)()
 		if #prey > 0 then
 			for _, e in ipairs(Sense.npcs(70)) do
 				local key = "fight:" .. e.name:lower()
-				if not onCool(key) and not Threat.classify(e) and Games.matchList(prey, e.set) then
+				if not onCool(key) and not Threat.classify(e) and Games.matchList(prey, e.set) and (not Brain.Vision or Brain.Vision.ok(e.pos)) then
 					items[#items + 1] = { kind = "fight", key = key, label = e.disp, how = ("fight %s (%d studs away)"):format(e.disp, math.floor(e.dist + 0.5)), does = "", why = "the game file says it is worth fighting", score = 52 - e.dist * 0.2, must = hpOk and #near == 0 and hasTool(), e = e }
 				end
 			end
@@ -12741,6 +14163,9 @@ end)()
 		end
 	end
 	local function press(sk)
+		if Brain.Gear then
+			Brain.Gear.lock = os.clock() + 2.5 -- the gear part leaves the hand alone while a skill uses a tool
+		end
 		if sk.via == "tool" then
 			local char, root, hum = parts()
 			local prev = char and char:FindFirstChildOfClass("Tool")
@@ -13050,6 +14475,1312 @@ end)()
 		Skills.readyAt, Skills.found, Skills.foundAt = {}, {}, -99
 	end
 end)()
+------------------------------------------------------------------ gear: what is in the inventory, what each thing is for, and holding the right one for the job
+-- Every tool in the backpack is read (name, tooltip, description, the scripts and sounds inside it) and put into a purpose:
+--   weapon up close, ranged weapon from a distance, a pickaxe/axe/rod/shovel for the thing it works on, a key for a door, a light in the dark,
+--   a speed coil when running, a heal for when it is hurt (the Skills part uses those), a shield.
+-- It then HOLDS the right one for what it is doing right now (fighting a creature that is far away: the bow; the same creature up close: the sword),
+-- and it learns from what happens: a tool that never hurt anything is marked as useless, a tool that did damage becomes a weapon, and all of it is
+-- written to the game file so the next visit starts with what it learned.
+;(function()
+	local Gear = { stats = { swaps = 0, fights = 0, gathers = 0, lights = 0, runs = 0, aims = 0 }, log = {}, lock = 0, lastSwap = -99, lastSay = {}, cache = {}, lastRun = -99, lastLight = -99 }
+	Brain.Gear = Gear
+	local Games, Body, Threat = Brain.Games, Brain.Body, Brain.Threat
+	local PB = Brain.Playbook
+	local M = World.mouse
+	local norm = PB.norm
+
+	local function parts()
+		local c = lp.Character
+		return c, c and c:FindFirstChild("HumanoidRootPart"), c and c:FindFirstChildOfClass("Humanoid")
+	end
+	local function on()
+		return cfg.SmartGear ~= false and Core.on()
+	end
+	local function flat(a, b)
+		return math.sqrt((a.X - b.X) ^ 2 + (a.Z - b.Z) ^ 2)
+	end
+	local function say(key, msg)
+		local now = os.clock()
+		if Gear.lastSay[key] and now - Gear.lastSay[key] < 25 then
+			return
+		end
+		Gear.lastSay[key] = now
+		Gear.log[#Gear.log + 1] = os.date("%H:%M:%S", os.time()) .. "  " .. msg
+		while #Gear.log > 30 do
+			table.remove(Gear.log, 1)
+		end
+		if Brain.Pilot and Brain.Pilot.say then
+			Brain.Pilot.say(msg)
+		end
+		if Gear.onChange then
+			pcall(Gear.onChange)
+		end
+	end
+
+	------------------------------------------------------------ what a tool is for (from what it says it is)
+	local WORDS = {
+		ranged = { "bow", "longbow", "crossbow", "gun", "pistol", "rifle", "shotgun", "smg", "sniper", "blaster", "launcher", "missile", "bazooka", "cannon", "wand", "staff", "slingshot", "grenade", "bomb", "snowball", "boomerang", "shuriken", "kunai", "dart", "laser", "spell", "orb", "magic", "revolver", "musket", "flamethrower", "taser", "fireball", "lightning", "arrow", "railgun", "ak47", "uzi", "firearm", "turret", "thrower", "shooter", "plasma", "shoot", "shot", "bullet", "projectile", "reload", "ammo" },
+		melee = { "sword", "blade", "katana", "knife", "dagger", "mace", "club", "bat", "hammer", "spear", "whip", "fist", "glove", "gauntlet", "claw", "saber", "sabre", "rapier", "lance", "trident", "baton", "cleaver", "machete", "weapon", "stick", "flail", "halberd", "nunchaku", "punch", "sledge", "bone", "cane", "cutlass", "scimitar", "tomahawk", "battleaxe", "excalibur", "slap", "scythe" },
+		gather = { "pickaxe", "pick", "shovel", "spade", "hoe", "drill", "chainsaw", "saw", "sickle", "fishing", "rod", "net", "bucket", "mining", "harvest", "trowel", "jackhammer", "axe", "handaxe", "woodcutter", "digger", "rake", "pan" },
+		key = { "key", "keycard", "passcard", "pass", "ticket", "badge", "lockpick", "crowbar", "fob", "card" },
+		heal = { "heal", "potion", "medkit", "bandage", "health", "regen", "cure", "syringe", "apple", "bread", "food", "pizza", "cola", "soda", "burger", "sandwich", "cookie", "cake", "elixir", "meat", "medic", "banana", "water", "juice", "coffee", "tea", "candy", "chocolate" },
+		light = { "flashlight", "torch", "lantern", "lamp", "glowstick", "candle", "headlamp", "lightstick", "glow", "light" },
+		mobility = { "grapple", "hook", "jetpack", "jet", "hoverboard", "glider", "coil", "carpet", "wings", "parachute", "pogo", "rope", "teleport", "blink", "boots", "skate", "scooter", "speed", "gravity", "sprint", "dash", "rocketboots", "propeller" },
+		shield = { "shield", "armor", "armour", "barrier", "ward", "forcefield", "buckler" },
+		build = { "block", "brick", "plank", "build", "builder", "blueprint", "wall", "place" },
+	}
+	-- the order matters when two purposes score the same
+	local ORDER = { "ranged", "melee", "gather", "key", "heal", "light", "shield", "mobility", "build" }
+	-- things that are also fine to hit something with
+	local DUAL = { pickaxe = 1, axe = 1, hammer = 1, scythe = 1, shovel = 1, sickle = 1, saw = 1, chainsaw = 1, spade = 1, hoe = 1, drill = 1, handaxe = 1, rake = 1, jackhammer = 1 }
+	-- tools that work just by being held (no aiming): worth holding while running
+	local PASSIVE = { "coil", "boots", "speed", "gravity", "skate", "scooter", "hoverboard", "jetpack", "propeller", "wings", "glider", "carpet", "sprint" }
+
+	local function tokens(s, out, weight)
+		s = tostring(s or "")
+		-- "SpeedCoil" -> "Speed Coil", "FireAxe2" -> "Fire Axe"
+		s = s:gsub("(%l)(%u)", "%1 %2"):gsub("[^%a%d]+", " ")
+		for w in s:lower():gmatch("%a+") do
+			out[#out + 1] = { w, weight }
+		end
+	end
+	local function matches(tok, word)
+		if tok == word or tok == word .. "s" then
+			return true
+		end
+		return #word >= 4 and #tok >= #word and tok:find(word, 1, true) ~= nil
+	end
+
+	local function textOf(tool)
+		local bits = { tool.Name }
+		local tip = ""
+		pcall(function()
+			tip = tostring(tool.ToolTip or "")
+		end)
+		for _, a in ipairs({ "Description", "Desc", "Type", "ToolType", "ItemType", "Category", "Class", "Kind" }) do
+			pcall(function()
+				local v = tool:GetAttribute(a)
+				if type(v) == "string" then
+					tip = tip .. " " .. v
+				end
+			end)
+		end
+		local inner = {}
+		pcall(function()
+			local n = 0
+			for _, d in ipairs(tool:GetDescendants()) do
+				n = n + 1
+				if n > 40 then
+					break
+				end
+				if d:IsA("RemoteEvent") or d:IsA("Script") or d:IsA("LocalScript") or d:IsA("ModuleScript") or d:IsA("Sound") then
+					inner[#inner + 1] = d.Name
+				end
+			end
+		end)
+		return tool.Name, tip, table.concat(inner, " ")
+	end
+
+	-- what the tool is for: { main, set = {purpose = score}, fights, passive }
+	local function wordsClass(tool)
+		local nm, tip, inner = textOf(tool)
+		local ck = nm .. "|" .. tip .. "|" .. inner
+		local c = Gear.cache[ck]
+		if c then
+			return c
+		end
+		local toks = {}
+		tokens(nm, toks, 3)
+		tokens(tip, toks, 2)
+		tokens(inner, toks, 1)
+		local set = {}
+		for _, tw in ipairs(toks) do
+			for purpose, list in pairs(WORDS) do
+				for _, w in ipairs(list) do
+					if matches(tw[1], w) then
+						set[purpose] = (set[purpose] or 0) + #w * tw[2]
+						break
+					end
+				end
+			end
+		end
+		local main, ms = "unknown", 0
+		for _, p in ipairs(ORDER) do
+			if (set[p] or 0) > ms then
+				main, ms = p, set[p]
+			end
+		end
+		local dual = false
+		for _, tw in ipairs(toks) do
+			if DUAL[tw[1]] then
+				dual = true
+			end
+		end
+		local passive = false
+		for _, tw in ipairs(toks) do
+			for _, w in ipairs(PASSIVE) do
+				if tw[2] >= 2 and matches(tw[1], w) then
+					passive = true
+				end
+			end
+		end
+		c = { main = main, set = set, dual = dual, passive = passive }
+		Gear.cache[ck] = c
+		return c
+	end
+
+	------------------------------------------------------------ what it learned about each one (kept in the game file)
+	local function know()
+		local g = Games.cur(false)
+		return g and g.know
+	end
+	local function recOf(tool, cls)
+		local k = know()
+		if not k then
+			return nil
+		end
+		k.gear = k.gear or {}
+		local nk = norm(tool.Name)
+		if nk == "" then
+			return nil
+		end
+		local r = k.gear[nk]
+		if not r then
+			r = { name = tool.Name, kind = cls and cls.main or "unknown", src = "name", n = 0, hits = 0, dmg = 0, t = os.time() }
+			k.gear[nk] = r
+			Games.save()
+		end
+		return r
+	end
+	-- the full picture of one tool: purposes by words, overridden by what it has proven
+	local function classify(tool)
+		local c = wordsClass(tool)
+		local r = recOf(tool, c)
+		local main = c.main
+		-- a tool a skill learned to be something (heal, shield, dash...) keeps that purpose
+		local k = know()
+		local sr = k and k.skills and k.skills[norm(tool.Name)]
+		if sr and sr.kind and sr.kind ~= "unknown" and (main == "unknown" or main == "build") then
+			main = ({ heal = "heal", shield = "shield", dash = "mobility", buff = "mobility", damage = "ranged" })[sr.kind] or main
+		end
+		if r and r.src == "learned" and r.kind and r.kind ~= "unknown" then
+			main = r.kind
+		end
+		return { main = main, set = c.set, dual = c.dual, passive = c.passive, rec = r }
+	end
+	Gear.classify = classify
+
+	------------------------------------------------------------ the inventory
+	function Gear.inventory()
+		local list = {}
+		local char = lp.Character
+		local bp = lp:FindFirstChildOfClass("Backpack")
+		for _, holder in ipairs({ char, bp }) do
+			if holder then
+				for _, t in ipairs(holder:GetChildren()) do
+					if t:IsA("Tool") then
+						local cls = classify(t)
+						list[#list + 1] = { tool = t, name = t.Name, held = holder == char, cls = cls, rec = cls.rec }
+					end
+				end
+			end
+		end
+		return list
+	end
+	local function held()
+		local c = lp.Character
+		return c and c:FindFirstChildOfClass("Tool")
+	end
+	local function isFighter(it)
+		local m = it.cls.main
+		return m == "melee" or m == "ranged" or (it.cls.dual and m ~= "heal")
+	end
+	function Gear.isWeapon(tool)
+		if not tool then
+			return false
+		end
+		local cls = classify(tool)
+		return cls.main == "melee" or cls.main == "ranged" or cls.dual or (cls.rec and cls.rec.hits and cls.rec.hits > 0) or false
+	end
+
+	------------------------------------------------------------ holding something
+	function Gear.equip(tool, why, wait)
+		local char, _, hum = parts()
+		if not (char and hum and tool and tool.Parent) then
+			return false
+		end
+		if tool.Parent == char then
+			return true
+		end
+		pcall(function()
+			hum:EquipTool(tool)
+		end)
+		Gear.stats.swaps = Gear.stats.swaps + 1
+		Gear.lastSwap = os.clock()
+		Gear.cur = { name = tool.Name, why = why or "", t = os.clock() }
+		say("eq:" .. tool.Name .. (why or ""), ("Equipped %s%s"):format(tool.Name, why and (" " .. why) or ""))
+		if wait then
+			task.wait(0.2)
+		end
+		return tool.Parent == char
+	end
+
+	------------------------------------------------------------ fighting: the sword up close, the bow from afar
+	local function ammoEmpty(tool)
+		local empty = false
+		pcall(function()
+			for _, a in ipairs({ "Ammo", "Clip", "Mag", "Bullets", "Arrows" }) do
+				local v = tool:GetAttribute(a)
+				if type(v) == "number" and v <= 0 then
+					empty = true
+				end
+				local c = tool:FindFirstChild(a)
+				if c and (c:IsA("IntValue") or c:IsA("NumberValue")) and c.Value <= 0 then
+					empty = true
+				end
+			end
+		end)
+		return empty
+	end
+	-- the best thing to hit something at this distance with (or nil): tool, why
+	function Gear.forFight(o)
+		o = o or {}
+		local d = o.dist
+		local best, bs, bwhy
+		for _, it in ipairs(Gear.inventory()) do
+			local m, r = it.cls.main, it.rec
+			local sc, why
+			if m == "ranged" then
+				sc, why = 50, "to shoot it"
+				if d and d > 12 then
+					sc, why = sc + 25, "to shoot it from here"
+				elseif d and d < 5 then
+					sc = sc - 20
+				end
+				if ammoEmpty(it.tool) then
+					sc = sc - 45
+				end
+			elseif m == "melee" then
+				sc, why = 50, "to fight it"
+				if d and d <= 12 then
+					sc, why = sc + 25, "to hit it up close"
+				end
+			elseif it.cls.dual and m ~= "heal" then
+				sc, why = 30, "to hit it"
+			elseif m == "unknown" and not (r and r.dud) then
+				sc, why = 18, "to see if it hurts it"
+			end
+			if sc then
+				if o.prefer and o.prefer ~= "" and it.name:lower():find(o.prefer:lower(), 1, true) then
+					sc = sc + 40
+				end
+				if r then
+					if r.dud then
+						sc = sc - 70
+					elseif (r.n or 0) >= 3 and (r.hits or 0) > 0 then
+						sc = sc + math.min(30, ((r.dmg or 0) / math.max(1, r.hits)) * 0.6 + (r.hits / r.n) * 12)
+					end
+				end
+				if it.held then
+					sc = sc + 4
+				end
+				if not bs or sc > bs then
+					best, bs, bwhy = it.tool, sc, why
+				end
+			end
+		end
+		return best, bwhy
+	end
+	-- the tool to hold for a fight. nil when it is switched off (the old way takes over) or when there is nothing to hit with
+	function Gear.fight(prefer, dist)
+		if not on() then
+			return nil
+		end
+		local best, why = Gear.forFight({ prefer = prefer, dist = dist })
+		local cur = held()
+		if not best then
+			return cur and Gear.isWeapon(cur) and cur or nil
+		end
+		if cur == best then
+			return cur
+		end
+		-- a weapon already in hand is only swapped when the other one is clearly better, not back and forth every second
+		if cur and Gear.isWeapon(cur) and os.clock() - Gear.lastSwap < 2.5 then
+			return cur
+		end
+		Gear.stats.fights = Gear.stats.fights + 1
+		Gear.equip(best, why, true)
+		return held() or best
+	end
+	-- how far a swing or a shot carries: what it learned, else a guess from the kind
+	function Gear.rangeOf(tool)
+		if not (tool and on()) then
+			return nil
+		end
+		local cls = classify(tool)
+		local r = cls.rec
+		if cls.main == "ranged" then
+			return math.clamp((r and r.reach and r.reach > 8 and r.reach + 2) or 34, 14, 60)
+		end
+		if cls.main == "melee" or cls.dual then
+			return math.clamp((r and r.reach and r.reach > 3 and r.reach + 0.5) or 6.5, 5, 12)
+		end
+		return nil
+	end
+	-- a ranged weapon is fired from here, not from in the creature's face
+	function Gear.standoff(tool)
+		if not (tool and on()) then
+			return nil
+		end
+		if classify(tool).main ~= "ranged" then
+			return nil
+		end
+		return math.max(8, (Gear.rangeOf(tool) or 34) * 0.7)
+	end
+	-- face it, put the camera and the cursor on it, so the shot goes where it should
+	function Gear.aim(pos)
+		local _, root = parts()
+		if not (root and pos) then
+			return
+		end
+		Gear.stats.aims = Gear.stats.aims + 1
+		pcall(function()
+			root.CFrame = CFrame.lookAt(root.Position, Vector3.new(pos.X, root.Position.Y, pos.Z))
+		end)
+		if Brain.Camera and Brain.Camera.look then
+			pcall(Brain.Camera.look, pos, "aiming", 1.2, 5)
+		end
+		if M and M.screenOf and M.setPos then
+			pcall(function()
+				local x, y = M.screenOf({ pos = pos })
+				if x and (not M.x or math.abs(M.x - x) + math.abs(M.y - y) > 30) then
+					M.setPos(x, y)
+				end
+			end)
+		end
+	end
+	-- after a swing: did it do anything?
+	function Gear.learnSwing(tool, dmg, dist)
+		if not (tool and tool.Parent) then
+			return
+		end
+		local cls = classify(tool)
+		local r = cls.rec
+		if not r then
+			return
+		end
+		r.n = (r.n or 0) + 1
+		if dmg and dmg > 0 then
+			r.hits = (r.hits or 0) + 1
+			r.dmg = (r.dmg or 0) + dmg
+			if dist and dist > (r.reach or 0) then
+				r.reach = dist
+			end
+			if r.dud then
+				r.dud = nil
+			end
+			if (cls.main == "unknown" or cls.main == "build") and r.hits >= 2 then
+				r.kind, r.src = (r.reach or 0) > 11 and "ranged" or "melee", "learned"
+				say("lw:" .. tool.Name, ("%s hurts things, so it is a weapon"):format(tool.Name))
+				pcall(World.lesson, ("%s works as a weapon"):format(tool.Name))
+			end
+		elseif (r.n or 0) >= 8 and (r.hits or 0) == 0 and dist and dist <= (Gear.rangeOf(tool) or 6.5) then
+			if not r.dud then
+				r.dud = true
+				say("dud:" .. tool.Name, ("%s never hurt anything, so I stop using it to fight"):format(tool.Name))
+				pcall(World.lesson, ("%s does not hurt anything"):format(tool.Name))
+			end
+		end
+		Games.save()
+	end
+
+	------------------------------------------------------------ working: the pickaxe for the ore, the axe for the tree, the key for the door
+	local NEEDS = {
+		{ what = "rock", look = { "ore", "rock", "stone", "mine", "mining", "crystal", "gem", "coal", "iron", "gold", "boulder", "mineral", "diamond", "copper", "ruby", "emerald", "vein", "quartz" }, tools = { "pickaxe", "pick", "drill", "mining", "jackhammer" } },
+		{ what = "tree", look = { "tree", "wood", "log", "lumber", "chop", "trunk", "timber", "stump" }, tools = { "axe", "saw", "chainsaw", "woodcutter" } },
+		{ what = "fish", look = { "fish", "fishing", "pond", "lake", "angling" }, tools = { "rod", "fishing", "net" } },
+		{ what = "dirt", look = { "dirt", "soil", "dig", "sand", "grave", "treasure", "buried", "mud" }, tools = { "shovel", "spade", "digger", "trowel" } },
+		{ what = "crop", look = { "crop", "plant", "wheat", "harvest", "farm", "weed", "corn", "carrot", "pumpkin", "field" }, tools = { "hoe", "sickle", "scythe", "rake", "harvest" } },
+		{ what = "water", look = { "well", "bucket", "pour", "fountain" }, tools = { "bucket", "can" } },
+		{ what = "lock", look = { "door", "gate", "lock", "locked", "chest", "vault", "safe", "cage", "cell", "padlock" }, tools = { "key", "keycard", "pass", "lockpick", "crowbar", "card", "badge" }, purpose = "key", soft = true },
+	}
+	local function needOf(label, obj)
+		local toks = {}
+		tokens(label, toks, 1)
+		if obj then
+			pcall(function()
+				tokens(obj.Name, toks, 1)
+				local p = obj:FindFirstChildWhichIsA("ProximityPrompt", true)
+				if p then
+					tokens(p.ActionText, toks, 1)
+					tokens(p.ObjectText, toks, 1)
+				end
+				if obj.Parent then
+					tokens(obj.Parent.Name, toks, 1)
+				end
+			end)
+		end
+		for _, n in ipairs(NEEDS) do
+			for _, tw in ipairs(toks) do
+				for _, w in ipairs(n.look) do
+					if matches(tw[1], w) then
+						return n
+					end
+				end
+			end
+		end
+		return nil
+	end
+	Gear.needOf = needOf
+	function Gear.forNeed(need)
+		local best, bs
+		for _, it in ipairs(Gear.inventory()) do
+			local sc = 0
+			local tk = {}
+			tokens(it.name, tk, 1)
+			for _, w in ipairs(need.tools) do
+				local hit = false
+				for _, x in ipairs(tk) do
+					if x[1] == w or x[1] == w .. "s" then
+						hit = true
+					end
+				end
+				if hit then
+					sc = sc + 60
+					break
+				end
+			end
+			if sc == 0 and need.purpose and it.cls.main == need.purpose then
+				sc = 40
+			elseif sc == 0 and it.cls.main == "gather" and not need.purpose then
+				sc = 20
+			end
+			if sc > 0 then
+				local r = it.rec
+				if r and r.work and r.work[need.what] then
+					local w = r.work[need.what]
+					sc = sc + math.min(20, (w.ok or 0) * 6) - math.min(40, (w.miss or 0) * 8)
+				end
+				if it.held then
+					sc = sc + 3
+				end
+				if not bs or sc > bs then
+					best, bs = it.tool, sc
+				end
+			end
+		end
+		return best
+	end
+	-- before using something in the world: hold what it works with. returns tool, need (or nil)
+	function Gear.beforeInteract(label, obj)
+		if not on() then
+			return nil
+		end
+		local need = needOf(label, obj)
+		if not need then
+			return nil
+		end
+		local tool = Gear.forNeed(need)
+		if not tool then
+			return nil
+		end
+		Gear.stats.gathers = Gear.stats.gathers + 1
+		Gear.equip(tool, ("to work on %s"):format(label or need.what), true)
+		return held() or tool, need
+	end
+	local function leaderSum()
+		local s = 0
+		pcall(function()
+			local ls = lp:FindFirstChild("leaderstats")
+			if ls then
+				for _, v in ipairs(ls:GetChildren()) do
+					if v:IsA("IntValue") or v:IsA("NumberValue") then
+						s = s + v.Value
+					end
+				end
+			end
+		end)
+		return s
+	end
+	local function stateOf(obj)
+		local s = { alive = obj and obj.Parent ~= nil, ls = leaderSum(), hp = nil }
+		pcall(function()
+			local h = obj:FindFirstChildOfClass("Humanoid")
+			s.hp = h and h.Health or obj:GetAttribute("Health")
+		end)
+		return s
+	end
+	-- swing the held tool at it a few times and watch whether anything changes: that is how it learns what the tool is good for
+	function Gear.swing(obj, pos, tries, need)
+		local char, root = parts()
+		local tool = held()
+		if not (tool and root) then
+			return false
+		end
+		local before = stateOf(obj)
+		local changed = false
+		for i = 1, tries or 4 do
+			if not (obj and obj.Parent) then
+				changed = true
+				break
+			end
+			Gear.aim(pos or (obj:IsA("BasePart") and obj.Position) or root.Position)
+			pcall(function()
+				tool:Activate()
+			end)
+			task.wait(0.45)
+			local now = stateOf(obj)
+			if not now.alive or now.ls ~= before.ls or (now.hp and before.hp and now.hp ~= before.hp) then
+				changed = true
+				break
+			end
+		end
+		local r = classify(tool).rec
+		if r and need then
+			r.work = r.work or {}
+			local w = r.work[need.what] or { ok = 0, miss = 0 }
+			r.work[need.what] = w
+			if changed then
+				w.ok = w.ok + 1
+				if w.ok == 1 then
+					say("wk:" .. tool.Name .. need.what, ("%s works on %s"):format(tool.Name, need.what))
+					pcall(World.lesson, ("%s works on %s"):format(tool.Name, need.what))
+				end
+			else
+				w.miss = w.miss + 1
+			end
+			Games.save()
+		end
+		return changed
+	end
+
+	------------------------------------------------------------ the rest of what a player does with an inventory
+	local function darkNow()
+		local ok, res = pcall(function()
+			local L = game:GetService("Lighting")
+			local amb = L.Ambient
+			local lum = amb and (amb.R + amb.G + amb.B) / 3 or 1
+			local clock = L.ClockTime
+			local night = type(clock) == "number" and (clock >= 19.5 or clock < 4.5)
+			return lum < 0.16 or (night and lum < 0.4)
+		end)
+		return ok and res == true
+	end
+	Gear.dark = darkNow
+	function Gear.byPurpose(word)
+		word = tostring(word or ""):lower()
+		if word == "" then
+			return nil
+		end
+		local purpose
+		for _, p in ipairs(ORDER) do
+			for _, w in ipairs(WORDS[p]) do
+				if word == w or word == p then
+					purpose = p
+					break
+				end
+			end
+			if purpose then
+				break
+			end
+		end
+		if not purpose and (word == "weapon" or word == "fight" or word == "attack") then
+			purpose = "melee"
+		end
+		if not purpose then
+			return nil
+		end
+		if word == "weapon" or word == "fight" or word == "attack" then
+			return (Gear.forFight({ dist = 3 }))
+		end
+		local best, bs
+		for _, it in ipairs(Gear.inventory()) do
+			if it.cls.main == purpose then
+				local sc = it.held and 2 or 1
+				if not bs or sc > bs then
+					best, bs = it.tool, sc
+				end
+			end
+		end
+		return best
+	end
+	-- the equip action's lookup when no tool has exactly that name: "weapon", "light", "key", "pickaxe"...
+	function Gear.find(word)
+		if cfg.SmartGear == false then
+			return nil
+		end
+		local t = Gear.byPurpose(word)
+		if t then
+			return t
+		end
+		local need = needOf(word)
+		return need and Gear.forNeed(need) or nil
+	end
+
+	local function tick()
+		if not on() then
+			return
+		end
+		local P = Brain.Pilot
+		if not ((P and P.active) or cfg.FreeWill) or (P and P.paused) then
+			return
+		end
+		if os.clock() < Gear.lock or Body.target then
+			return -- a fight or a skill is choosing its own tool
+		end
+		local char, root, hum = parts()
+		if not (char and root and hum) or hum.Health <= 0 then
+			return
+		end
+		local cur = held()
+		local inv = Gear.inventory()
+		if #inv == 0 then
+			return
+		end
+		local now = os.clock()
+		-- running: whatever makes it faster, held
+		if Body.fleeing and now - Gear.lastRun > 6 then
+			for _, it in ipairs(inv) do
+				if it.cls.passive and not it.held and it.cls.main == "mobility" and not (it.rec and it.rec.dud) then
+					Gear.lastRun = now
+					Gear.stats.runs = Gear.stats.runs + 1
+					Gear.equip(it.tool, "to run faster")
+					return
+				end
+			end
+			return
+		end
+		if Body.fleeing then
+			return
+		end
+		-- something hostile is close and there is nothing to hit it with in the hand
+		for _, th in ipairs(Threat.list or {}) do
+			if th.dist < 18 and th.level >= 1 and not (cur and Gear.isWeapon(cur)) and now - Gear.lastSwap > 4 then
+				local t = Gear.forFight({ dist = th.dist })
+				if t then
+					Gear.equip(t, ("because %s is close"):format(th.name or "something"))
+				end
+				return
+			end
+		end
+		-- dark: a light in the hand shows more of the map
+		if now - Gear.lastLight > 20 and darkNow() then
+			for _, it in ipairs(inv) do
+				if it.cls.main == "light" and not it.held then
+					Gear.lastLight = now
+					Gear.stats.lights = Gear.stats.lights + 1
+					Gear.equip(it.tool, "because it is dark")
+					return
+				end
+			end
+			Gear.lastLight = now
+		end
+	end
+	task.spawn(function()
+		while Alive do
+			task.wait(0.8)
+			pcall(tick)
+		end
+	end)
+
+	------------------------------------------------------------ for the planner and the window
+	local KIND_TEXT = { melee = "hits up close", ranged = "shoots from far away", gather = "works on ore, trees, fish or dirt", key = "opens doors", heal = "heals me", light = "light", mobility = "moves me", shield = "protects me", build = "builds", unknown = "not sure yet" }
+	local function describe(it)
+		local r = it.rec
+		local s = ("%s (%s%s%s)"):format(it.name, KIND_TEXT[it.cls.main] or it.cls.main, it.held and ", in my hand" or "", (r and r.dud) and ", useless" or "")
+		return s
+	end
+	function Gear.text()
+		if not on() then
+			return ""
+		end
+		local inv = Gear.inventory()
+		if #inv == 0 then
+			return ""
+		end
+		local L = {}
+		for i, it in ipairs(inv) do
+			if i > 8 then
+				break
+			end
+			L[#L + 1] = describe(it)
+		end
+		return "INVENTORY: " .. table.concat(L, "; ") .. '. The program holds the right one by itself (the sword up close, the bow far away, the pickaxe at ore, a key at doors, a light in the dark). To pick one yourself: {"do":"equip","name":"..."} or {"do":"equip","for":"weapon"}.'
+	end
+	function Gear.summary()
+		local L = {}
+		for _, it in ipairs(Gear.inventory()) do
+			local r = it.rec
+			local extra = ""
+			if r and (r.n or 0) > 0 then
+				extra = (", %d swings, %d hits"):format(r.n or 0, r.hits or 0)
+			end
+			L[#L + 1] = describe(it) .. extra
+		end
+		return L
+	end
+	function Gear.forget()
+		local k = know()
+		if k then
+			k.gear = {}
+			Games.save()
+		end
+		Gear.cache, Gear.lastSay, Gear.cur = {}, {}, nil
+	end
+end)()
+------------------------------------------------------------------ camera: it turns the view to what it needs to see, and shows where it is looking
+-- A player does not stare at one spot. This looks at:
+--   the creature it is fighting or aiming at, a threat that is near (and back at it now and then while running),
+--   the ledge, gap, wall or kill brick right ahead of it, the thing it is about to use, where it is going,
+--   and around it (left, right, behind) when it stands still or is exploring.
+-- It is laid over the normal Roblox camera (the game's own camera still runs underneath), fades in and out, never runs while the game itself has taken
+-- the camera (cutscene, vehicle) and lets go for a few seconds as soon as the player drags the screen. The place it looks at is marked in the world
+-- (a ring with a short caption and a thin line from its eyes), it is written on the top bar, and the whole thing has a switch (cfg.AICamera) and a
+-- switch for the marker (cfg.ShowGaze).
+;(function()
+	local Camera = { w = 0, yaw = 0, pitch = 0, focus = nil, focusAt = -99, intents = {}, stats = { looks = 0, sweeps = 0, frames = 0, yielded = 0, faces = 0 }, userUntil = 0, goal = nil, aheadAt = -99, sweepAt = nil, runs = false, shown = nil }
+	Brain.Camera = Camera
+	local Body, Threat, Terrain = Brain.Body, Brain.Threat, Brain.Terrain
+	local RunService = game:GetService("RunService")
+	local CYAN = Color3.fromRGB(80, 220, 255)
+
+	local function parts()
+		local c = lp.Character
+		return c, c and c:FindFirstChild("HumanoidRootPart"), c and c:FindFirstChildOfClass("Humanoid")
+	end
+	local function cam()
+		return workspace.CurrentCamera
+	end
+	local function isVec(p)
+		local ok, r = pcall(function()
+			return p.X ~= nil and p.Y ~= nil and p.Z ~= nil
+		end)
+		return ok and r == true
+	end
+	local function isInst(p)
+		local ok, r = pcall(function()
+			return p.IsA
+		end)
+		return ok and r ~= nil
+	end
+	local function posOf(p)
+		if p == nil then
+			return nil
+		end
+		if type(p) == "function" then
+			local ok, v = pcall(p)
+			return ok and v ~= nil and not (type(v) == "function") and posOf(v) or nil
+		end
+		if isInst(p) then
+			if p:IsA("BasePart") then
+				return p.Position
+			end
+			local r = p:FindFirstChild("HumanoidRootPart") or p.PrimaryPart or p:FindFirstChildWhichIsA("BasePart")
+			return r and r.Position or nil
+		end
+		if isVec(p) then
+			return p
+		end
+		return nil
+	end
+	-- is the AI allowed to touch the camera right now?
+	local function usable()
+		if cfg.AICamera == false or not Core.on() then
+			return false
+		end
+		local P = Brain.Pilot
+		if not ((P and P.active) or cfg.FreeWill) or (P and P.paused) then
+			return false
+		end
+		return true
+	end
+	-- the game took the camera (cutscene, fixed or vehicle camera): stay out of it
+	local function gameOwns()
+		local c = cam()
+		if not c then
+			return true
+		end
+		local ok, ct = pcall(function()
+			return c.CameraType
+		end)
+		local nm = ok and ct ~= nil and tostring(ct) or ""
+		return nm:find("Scriptable", 1, true) ~= nil or nm:find("Fixed", 1, true) ~= nil or nm:find("Attach", 1, true) ~= nil or nm:find("Watch", 1, true) ~= nil
+	end
+
+	------------------------------------------------------------ asking it to look
+	-- anything can ask for a look: pos (a point, a part, a creature or a function that gives one), why, seconds, priority (1 idle ... 5 fighting)
+	function Camera.look(pos, why, secs, prio)
+		if cfg.AICamera == false then
+			return
+		end
+		Camera.intents[why or "look"] = { pos = pos, why = why or "something", exp = os.clock() + (secs or 1.5), prio = prio or 2 }
+		Camera.stats.looks = Camera.stats.looks + 1
+	end
+	-- turn to it and wait until it is in view (so a click on it lands). true when it is in front of the camera
+	function Camera.face(pos, why, maxWait)
+		if not (usable() and not gameOwns()) or os.clock() < Camera.userUntil then
+			return false
+		end
+		Camera.stats.faces = Camera.stats.faces + 1
+		Camera.look(pos, why or "using it", 2.5, 4)
+		local t0 = os.clock()
+		while Alive and os.clock() - t0 < (maxWait or 0.9) do
+			local c = cam()
+			local _, root = parts()
+			local p = posOf(pos)
+			if c and root and p then
+				local d = p - root.Position
+				if d.Magnitude < 1 or c.CFrame.LookVector:Dot(d.Unit) > 0.88 then
+					return true
+				end
+			end
+			task.wait(0.1)
+		end
+		return false
+	end
+
+	------------------------------------------------------------ what is worth looking at right now
+	local KIND_WHY = { gap = "checking the gap ahead", drop = "checking the drop ahead", hazard = "keeping an eye on the danger ahead", wall = "looking at the wall ahead", ledge = "looking at the ledge", water = "looking at the water ahead" }
+	local function candidates(root, hum)
+		local now = os.clock()
+		local list = {}
+		local eye = root.Position + Vector3.new(0, 1.5, 0)
+		for k, it in pairs(Camera.intents) do
+			if it.exp > now then
+				local p = posOf(it.pos)
+				if p then
+					list[#list + 1] = { pos = p, why = it.why, prio = it.prio }
+				end
+			else
+				Camera.intents[k] = nil
+			end
+		end
+		-- the fight
+		local tgt = Body and Body.target
+		if tgt and tgt.Parent then
+			local p = posOf(tgt)
+			if p then
+				list[#list + 1] = { pos = p + Vector3.new(0, 1.2, 0), why = "fighting " .. tostring(tgt.Name), prio = 5 }
+			end
+		end
+		-- danger: watch it; while running, look where it runs and glance back at what is chasing it
+		local top = Threat and Threat.list and Threat.list[1]
+		local backNow = false
+		if top and top.pos and top.dist < 60 and not tgt then
+			if Body.fleeing then
+				backNow = (math.floor(now / 1.4) % 3) == 0
+			end
+			if not Body.fleeing or backNow then
+				list[#list + 1] = { pos = top.pos + Vector3.new(0, 1.2, 0), why = (Body.fleeing and "checking what chases me: " or "watching ") .. tostring(top.name), prio = (top.level or 1) >= 2 and 4 or 3 }
+			end
+		end
+		local mv = hum.MoveDirection
+		local moving = mv.Magnitude > 0.1
+		if moving and not backNow then
+			local flatMv = Vector3.new(mv.X, 0, mv.Z)
+			flatMv = flatMv.Magnitude > 0.01 and flatMv.Unit or nil
+			if flatMv then
+				-- what is right in front of the feet: a gap, a drop, a wall, a kill brick
+				if Terrain and now - Camera.aheadAt > 0.35 then
+					Camera.aheadAt = now
+					local ok, info = pcall(Terrain.ahead, flatMv, 9)
+					Camera.ahead = ok and info or nil
+				end
+				local info = Camera.ahead
+				if info and info.d and info.d < 9 and KIND_WHY[info.kind] then
+					local spot = root.Position + flatMv * info.d
+					if info.kind == "gap" or info.kind == "drop" or info.kind == "hazard" or info.kind == "water" then
+						spot = Vector3.new(spot.X, root.Position.Y - 3, spot.Z)
+					else
+						spot = Vector3.new(spot.X, root.Position.Y + 1.5, spot.Z)
+					end
+					list[#list + 1] = { pos = spot, why = KIND_WHY[info.kind], prio = 3 }
+				end
+				-- where it is going, when that is roughly the way it walks
+				local g = Camera.goal
+				if g and now - g.t < 60 then
+					local gv = g.pos - root.Position
+					local gf = Vector3.new(gv.X, 0, gv.Z)
+					if gf.Magnitude > 3 and gf.Magnitude < 90 and gf.Unit:Dot(flatMv) > 0.5 then
+						list[#list + 1] = { pos = g.pos, why = "heading to " .. tostring(g.label or "a spot"), prio = 2 }
+					end
+				end
+				list[#list + 1] = { pos = eye + flatMv * 14, why = "where I am going", prio = 1 }
+			end
+		end
+		-- standing still or exploring: look around, left and right and behind
+		local nowDoing = tostring(Body and Body.now or "")
+		local scanning = (not moving and #list == 0) or (moving and nowDoing:find("explor", 1, true) and (now % 9) < 2.6)
+		if scanning then
+			if not Camera.sweepAt or now - Camera.sweepAt > 12 then
+				Camera.sweepAt = now
+				Camera.stats.sweeps = Camera.stats.sweeps + 1
+			end
+			local i = math.floor((now - Camera.sweepAt) / 1.3) % 6
+			local ang = ({ 0, 1.2, -1.2, 2.4, -2.4, 3.14 })[i + 1]
+			local base = root.CFrame.LookVector
+			local by = math.atan2(-base.X, -base.Z) + ang
+			local dirv = Vector3.new(-math.sin(by), 0, -math.cos(by))
+			list[#list + 1] = { pos = eye + dirv * 16, why = "looking around", prio = moving and 1.5 or 1 }
+		else
+			Camera.sweepAt = nil
+		end
+		return list
+	end
+
+	local function pickFocus(list)
+		local now = os.clock()
+		local best
+		for _, c in ipairs(list) do
+			if not best or c.prio > best.prio then
+				best = c
+			end
+		end
+		local cur = Camera.focus
+		if cur and best and cur.why ~= best.why and now - Camera.focusAt < 0.8 and best.prio <= cur.prio then
+			-- keep looking at the same thing a moment longer, no flicking about
+			for _, c in ipairs(list) do
+				if c.why == cur.why then
+					best = c
+					break
+				end
+			end
+		end
+		if best and (not cur or cur.why ~= best.why) then
+			Camera.focusAt = now
+		end
+		return best
+	end
+
+	------------------------------------------------------------ the player takes the camera back
+	local UIS = game:GetService("UserInputService")
+	track(UIS.InputChanged:Connect(function(input, processed)
+		local t = input.UserInputType
+		local drag = false
+		if t == Enum.UserInputType.Touch and not processed then
+			local d = input.Delta
+			drag = d ~= nil and (math.abs(d.X) + math.abs(d.Y)) > 3
+		elseif t == Enum.UserInputType.MouseMovement then
+			local ok, down = pcall(function()
+				return UIS:IsMouseButtonPressed(Enum.UserInputType.MouseButton2)
+			end)
+			drag = ok and down == true
+		end
+		if drag and Camera.focus then
+			if os.clock() >= Camera.userUntil then
+				Camera.stats.yielded = Camera.stats.yielded + 1
+			end
+			Camera.userUntil = os.clock() + 4
+		end
+	end))
+
+	------------------------------------------------------------ where it looks, drawn in the world
+	local mark, eyeMark, billboard, caption, beam
+	local function dropMarks()
+		for _, o in ipairs({ mark, eyeMark }) do
+			if o then
+				pcall(function()
+					o:Destroy()
+				end)
+			end
+		end
+		mark, eyeMark, billboard, caption, beam = nil, nil, nil, nil, nil
+	end
+	local function ensureMarks()
+		if mark and mark.Parent and eyeMark and eyeMark.Parent then
+			return true
+		end
+		dropMarks()
+		local c = cam()
+		if not c then
+			return false
+		end
+		pcall(function()
+			local function dot(name)
+				local p = Instance.new("Part")
+				p.Name = name
+				World.markOwn(p)
+				p.Anchored, p.CanCollide, p.CanQuery, p.CanTouch, p.CastShadow = true, false, false, false, false
+				p.Transparency = 1
+				p.Size = Vector3.new(0.3, 0.3, 0.3)
+				p.Parent = c
+				return p
+			end
+			mark, eyeMark = dot("SZGaze"), dot("SZGazeFrom")
+			local bg = Instance.new("BillboardGui")
+			bg.Name = "Gaze"
+			bg.AlwaysOnTop = true
+			bg.Size = UDim2.fromOffset(190, 60)
+			bg.StudsOffset = Vector3.new(0, 1.2, 0)
+			bg.Adornee = mark
+			bg.Parent = mark
+			billboard = bg
+			local ring = Instance.new("Frame")
+			ring.AnchorPoint = Vector2.new(0.5, 0)
+			ring.Position = UDim2.new(0.5, 0, 0, 0)
+			ring.Size = UDim2.fromOffset(26, 26)
+			ring.BackgroundTransparency = 0.75
+			ring.BackgroundColor3 = CYAN
+			ring.BorderSizePixel = 0
+			ring.Active = false
+			ring.Parent = bg
+			local rc = Instance.new("UICorner")
+			rc.CornerRadius = UDim.new(1, 0)
+			rc.Parent = ring
+			local rs = Instance.new("UIStroke")
+			rs.Color = CYAN
+			rs.Thickness = 2.5
+			rs.Parent = ring
+			local cap = Instance.new("TextLabel")
+			cap.AnchorPoint = Vector2.new(0.5, 0)
+			cap.Position = UDim2.new(0.5, 0, 0, 30)
+			cap.Size = UDim2.fromOffset(190, 22)
+			cap.BackgroundColor3 = Color3.fromRGB(10, 10, 14)
+			cap.BackgroundTransparency = 0.3
+			cap.BorderSizePixel = 0
+			cap.Font = Enum.Font.GothamMedium
+			cap.TextSize = 12
+			cap.TextColor3 = Color3.fromRGB(255, 255, 255)
+			cap.TextTruncate = Enum.TextTruncate.AtEnd
+			cap.Text = ""
+			cap.Active = false
+			cap.Parent = bg
+			local cc = Instance.new("UICorner")
+			cc.CornerRadius = UDim.new(0, 8)
+			cc.Parent = cap
+			caption = cap
+		end)
+		-- a thin line from its eyes to the spot
+		pcall(function()
+			local a0, a1 = Instance.new("Attachment"), Instance.new("Attachment")
+			a0.Parent, a1.Parent = eyeMark, mark
+			local b = Instance.new("Beam")
+			b.Attachment0, b.Attachment1 = a0, a1
+			b.Width0, b.Width1 = 0.12, 0.12
+			b.Color = ColorSequence.new(CYAN)
+			b.Transparency = NumberSequence.new(0.45)
+			b.LightEmission = 1
+			b.FaceCamera = true
+			b.Segments = 1
+			b.Parent = eyeMark
+			beam = b
+		end)
+		return mark ~= nil and mark.Parent ~= nil
+	end
+	local function hideMarks()
+		if billboard then
+			pcall(function()
+				billboard.Enabled = false
+			end)
+		end
+		if beam then
+			pcall(function()
+				beam.Enabled = false
+			end)
+		end
+	end
+	local function drawMarks(eye, fpos, why)
+		if cfg.ShowGaze == false or cfg.AICamera == false then
+			hideMarks()
+			return
+		end
+		if not ensureMarks() then
+			return
+		end
+		local dv = fpos - eye
+		local p = fpos
+		if dv.Magnitude > 70 then
+			p = eye + dv.Unit * 70 -- far things are marked on the line toward them
+		end
+		pcall(function()
+			mark.Position = p
+			eyeMark.Position = eye
+			billboard.Enabled = true
+			if caption.Text ~= why then
+				caption.Text = why
+			end
+		end)
+		if beam then
+			pcall(function()
+				beam.Enabled = true
+			end)
+		end
+	end
+
+	------------------------------------------------------------ every frame: lay the look over the game's own camera
+	local function wrap(a)
+		return (a + math.pi) % (2 * math.pi) - math.pi
+	end
+	local rayP
+	local function step(dt)
+		if not Alive then
+			return
+		end
+		local c = cam()
+		if not c then
+			return
+		end
+		local want = Camera.runs and Camera.focus ~= nil and os.clock() >= Camera.userUntil
+		local target = want and 1 or 0
+		local rate = target > Camera.w and 3.5 or 2.5
+		local was = Camera.w
+		Camera.w = Camera.w + math.clamp(target - Camera.w, -rate * dt, rate * dt)
+		if Camera.w <= 0.001 then
+			Camera.w = 0
+			if was > 0 then
+				hideMarks()
+			end
+			return
+		end
+		local f = Camera.focus or Camera.shown
+		local char, root = parts()
+		if not (f and root) then
+			return
+		end
+		Camera.shown = f
+		local head = char:FindFirstChild("Head")
+		local eye = head and head.Position or (root.Position + Vector3.new(0, 1.5, 0))
+		local dv = f.pos - eye
+		if dv.Magnitude < 0.8 then
+			return
+		end
+		local look0 = c.CFrame.LookVector
+		if was <= 0.001 then
+			-- starting from where the game's camera looks now, no jump
+			Camera.yaw = math.atan2(-look0.X, -look0.Z)
+			Camera.pitch = math.asin(math.clamp(look0.Y, -1, 1))
+		end
+		local ty = math.atan2(-dv.X, -dv.Z)
+		local tp = math.clamp(math.asin(math.clamp(dv.Y / dv.Magnitude, -1, 1)), -0.9, 0.75)
+		local a = 1 - math.exp(-dt * 6.5)
+		Camera.yaw = Camera.yaw + wrap(ty - Camera.yaw) * a
+		Camera.pitch = Camera.pitch + (tp - Camera.pitch) * a
+		local cp = math.cos(Camera.pitch)
+		local dir = Vector3.new(-math.sin(Camera.yaw) * cp, math.sin(Camera.pitch), -math.cos(Camera.yaw) * cp)
+		local dist = math.clamp((c.CFrame.Position - eye).Magnitude, 0.5, 40)
+		local camPos = eye - dir * dist
+		if dist > 1.5 then
+			-- a wall behind it: come closer instead of looking through the wall
+			if not rayP then
+				rayP = RaycastParams.new()
+				rayP.FilterType = Enum.RaycastFilterType.Exclude
+				pcall(function()
+					rayP.RespectCanCollide = true
+				end)
+			end
+			rayP.FilterDescendantsInstances = { char, mark, eyeMark }
+			local ok, hit = pcall(function()
+				return workspace:Raycast(eye, camPos - eye, rayP)
+			end)
+			if ok and hit and hit.Instance then
+				camPos = eye + (hit.Position - eye) * 0.92
+			end
+		end
+		local e = Camera.w * Camera.w * (3 - 2 * Camera.w)
+		local pos = c.CFrame.Position:Lerp(camPos, e)
+		local lk = look0:Lerp(dir, e)
+		if lk.Magnitude < 0.001 then
+			lk = dir
+		end
+		Camera.stats.frames = Camera.stats.frames + 1
+		pcall(function()
+			c.CFrame = CFrame.lookAt(pos, pos + lk.Unit)
+		end)
+		drawMarks(eye, f.pos, f.why)
+	end
+	Camera.step = step
+
+	------------------------------------------------------------ deciding (a few times a second)
+	local function tick()
+		local ok = usable() and not gameOwns()
+		Camera.runs = ok
+		if not ok then
+			Camera.focus = nil
+			return
+		end
+		local _, root, hum = parts()
+		if not (root and hum) or hum.Health <= 0 then
+			Camera.focus = nil
+			return
+		end
+		-- while the player holds the camera it still knows what it would look at (shown on the bar), it just does not turn the view
+		Camera.focus = pickFocus(candidates(root, hum))
+	end
+
+	-- where the walk is going (the look at the destination); wrapped so the walking code stays as it is
+	local origGoto = Body.goto
+	Body.goto = function(dest, o)
+		local mine = { pos = dest, label = o and o.label or "a spot", t = os.clock() }
+		Camera.goal = mine
+		local r1, r2, r3 = origGoto(dest, o)
+		if Camera.goal == mine then
+			Camera.goal = nil
+		end
+		return r1, r2, r3
+	end
+
+	local bound = false
+	pcall(function()
+		RunService:BindToRenderStep("SZAICam", Enum.RenderPriority.Camera.Value + 1, function(dt)
+			if Alive then
+				pcall(step, dt)
+			end
+		end)
+		bound = true
+	end)
+	if not bound then
+		task.spawn(function()
+			local last = os.clock()
+			while Alive do
+				task.wait()
+				local now = os.clock()
+				pcall(step, math.min(0.1, now - last))
+				last = now
+			end
+		end)
+	end
+	task.spawn(function()
+		while Alive do
+			task.wait(0.12)
+			pcall(tick)
+		end
+	end)
+	track({ Disconnect = function()
+		pcall(function()
+			RunService:UnbindFromRenderStep("SZAICam")
+		end)
+		dropMarks()
+	end })
+
+	------------------------------------------------------------ for the bar, the window and the planner
+	function Camera.status()
+		if cfg.AICamera == false then
+			return "camera: off"
+		end
+		if gameOwns() then
+			return "camera: the game has it"
+		end
+		if os.clock() < Camera.userUntil then
+			return "camera: you are moving it"
+		end
+		if Camera.runs and Camera.focus then
+			return "looking: " .. Camera.focus.why
+		end
+		return "camera: normal view"
+	end
+	function Camera.summary()
+		return ("%d looks asked for, %d looks around, %d times it let go because you moved the camera"):format(Camera.stats.looks, Camera.stats.sweeps, Camera.stats.yielded)
+	end
+	function Camera.set(on)
+		cfg.AICamera = on and true or false
+		if not on then
+			Camera.focus, Camera.intents = nil, {}
+			hideMarks()
+		end
+		return cfg.AICamera
+	end
+end)()
 ------------------------------------------------------------------ the pilot: plays the game on its own, learns by doing, and shows you what it is up to
 ;(function()
 	local Pilot = { active = false, paused = false, goal = "", thought = "", state = "off", feed = {}, steps = 0, plans = 0, startedAt = 0, fail = {}, llmErrors = 0, lastRes = {} }
@@ -13195,6 +15926,9 @@ end)()
 				pos = t.e.pos
 			end
 			local res = Body.goto(pos, { label = label, why = why, within = 4 })
+			if res == "unreachable" then
+				return "cannot reach " .. tostring(label) .. ": " .. tostring(Body.lastWhy or "blocked") .. ". Pick something else", "fail"
+			end
 			if res == "arrived" then
 				if t and (t.kind == "prompt" or t.kind == "click" or t.kind == "npc" or t.kind == "seat") then
 					Games.addPlace(label, pos, t.kind)
@@ -13279,6 +16013,9 @@ end)()
 				within = math.clamp(((t.obj.MaxActivationDistance or 10) * 0.6), 3, 9)
 			end
 			local res = Body.goto(pos, { label = t.label, why = why, within = within })
+			if res == "unreachable" then
+				return "cannot reach " .. t.label .. ": " .. tostring(Body.lastWhy or "blocked") .. ". Pick something else", "fail"
+			end
 			if res ~= "arrived" then
 				return "could not get to " .. t.label .. " (" .. res .. ")", (res == "threat" or res == "interrupted" or res == "dead" or res == "legsoff" or res == "yield") and "stop" or "fail"
 			end
@@ -13291,6 +16028,16 @@ end)()
 				target = refind(t) or t
 				M.byId[target.id or "tmp2"] = target
 				target.id = target.id or "tmp2"
+			end
+			-- hold what it works with (the pickaxe for ore, the key for a door) and swing it when the thing is not a prompt
+			if Brain.Gear and cfg.SmartGear ~= false then
+				local okg, gtool, gneed = pcall(Brain.Gear.beforeInteract, t.label, t.obj)
+				if okg and gtool and gneed and t.kind ~= "prompt" and not gneed.soft then
+					pcall(Brain.Gear.swing, t.obj, pos, 4, gneed)
+				end
+			end
+			if Brain.Camera then
+				pcall(Brain.Camera.face, pos, "using " .. tostring(t.label), 0.9) -- turn to it, so the click lands on the screen
 			end
 			local res2 = M.act({ ["do"] = "click", target = target.id }, { auto = true, pilot = true })
 			Games.addPlace(t.label, pos, t.kind)
@@ -13353,7 +16100,7 @@ end)()
 			if d == "say" and cfg.PlayTalk == false then
 				return "I decided not to chat while playing", "ok"
 			end
-			local res = M.act({ ["do"] = d, name = st.name or st.tool, key = st.key, text = st.text or st.message, x = st.x, y = st.y, target = st.target }, { auto = true, pilot = true })
+			local res = M.act({ ["do"] = d, name = st.name or st.tool or st["for"] or st.purpose, key = st.key, text = st.text or st.message, x = st.x, y = st.y, target = st.target }, { auto = true, pilot = true })
 			return res, (res:find("no tool", 1, true) or res:find("isn't possible", 1, true)) and "fail" or "ok"
 		end
 		return "I do not know how to " .. d, "fail"
@@ -13367,11 +16114,12 @@ How you play:
 - Stay alive. The program makes you run automatically when a known danger gets close, then you plan again. Fight only when it makes sense for the game.
 - Use the game's own buttons and menus with the cursor when the game needs them (start, shops, quests, upgrades). Close a window when you are done with it.
 - PLAYBOOK lines (ids pb1, pb2...) are things your own game file says to do that are possible right now: do them, they are what you learned. Do not ignore what you learned.
+- Things marked "(cannot reach: ...)" or listed under CANNOT REACH are behind a wall, too high or across a gap: never plan goto, collect or attack on them, pick something else or explore.
 - Never repeat something that did nothing twice. Do not stand around for long. Be bold and curious.
 - Chat: almost never. Use "say" only when you have something specific and new to say about what just happened (rare, most plans have no say). Never greet or say hello, never repeat or reword a message you already sent, and only words to type, no labels.
 Reply with ONLY a JSON object:
 {"thought":"one short sentence","goal":"short goal","steps":[{"do":"goto","target":"p1","why":"short"}],"learned":["short lesson"],"emotion":"excited"}
-Steps ("do"): skill (name of one of your SKILLS), goto (target id, or x and z, or place name), interact (target id: walk up and use a prompt, clicker, seat or character), click (target id of a screen button, or x and y as fractions 0 to 1 of the screen), attack (target id of a creature), collect (target id, or "what":"coin"), flee, explore, follow (target id of a player, seconds), equip (name), use (use the tool you hold), jump, key (one letter or Space), say (text), wait (seconds).
+Steps ("do"): skill (name of one of your SKILLS), goto (target id, or x and z, or place name), interact (target id: walk up and use a prompt, clicker, seat or character), click (target id of a screen button, or x and y as fractions 0 to 1 of the screen), attack (target id of a creature), collect (target id, or "what":"coin"), flee, explore, follow (target id of a player, seconds), equip (name of a tool, or "for":"weapon" / "light" / "key" / "pickaxe"), use (use the tool you hold), jump, key (one letter or Space), say (text), wait (seconds).
 Give 1 to 4 steps. Use ids exactly as listed (g1, p2, n1, k1...). If nothing is worth doing, explore.]]
 
 	local function experience()
@@ -13426,14 +16174,14 @@ Give 1 to 4 steps. Use ids exactly as listed (g1, p2, n1, k1...). If nothing is 
 		end
 		local list = Sense.targets()
 		for _, t in ipairs(list) do
-			if t.kind == "npc" and t.e and not Threat.classify(t.e) and Games.matchList(Games.preyList(), t.e.set) and t.dist < 60 then
+			if t.kind == "npc" and t.e and not Threat.classify(t.e) and Games.matchList(Games.preyList(), t.e.set) and t.dist < 60 and (not Brain.Vision or Brain.Vision.ok(t.pos)) then
 				steps[#steps + 1] = { ["do"] = "attack", target = t.id, why = "the game file says this is worth fighting" }
 				break
 			end
 		end
 		if #steps == 0 then
 			for _, t in ipairs(list) do
-				if t.kind == "collect" and t.dist < 60 then
+				if t.kind == "collect" and t.dist < 60 and (not Brain.Vision or Brain.Vision.ok(t.pos)) then
 					steps[#steps + 1] = { ["do"] = "collect", target = t.id, why = "free loot" }
 					break
 				end
@@ -13488,9 +16236,21 @@ Give 1 to 4 steps. Use ids exactly as listed (g1, p2, n1, k1...). If nothing is 
 		if skt ~= "" then
 			L[#L + 1] = skt
 		end
+		local gst = Brain.Gear and Brain.Gear.text() or ""
+		if gst ~= "" then
+			L[#L + 1] = gst
+		end
 		local mapt = Brain.Terrain and Brain.Terrain.summary() or ""
 		if mapt ~= "" then
 			L[#L + 1] = mapt
+		end
+		local vist = Brain.Vision and Brain.Vision.text() or ""
+		if vist ~= "" then
+			L[#L + 1] = vist
+		end
+		local kbt = Brain.Killers and Brain.Killers.text() or ""
+		if kbt ~= "" then
+			L[#L + 1] = kbt
 		end
 		local surt = Brain.Survive and Brain.Survive.text() or ""
 		if surt ~= "" then
@@ -13529,19 +16289,27 @@ Give 1 to 4 steps. Use ids exactly as listed (g1, p2, n1, k1...). If nothing is 
 		local msgs = { { role = "system", content = sys }, { role = "user", content = table.concat(L, "\n\n") } }
 		local plan
 		if #Keys.active() > 0 then
-			local text, err = llm(msgs, 520, "world")
-			plan = parsePlan(text)
-			if text and not plan then
-				msgs[#msgs + 1] = { role = "assistant", content = text }
-				msgs[#msgs + 1] = { role = "user", content = "Answer ONLY with the JSON plan." }
-				text, err = llm(msgs, 520, "world")
-				plan = parsePlan(text)
-			end
-			if not plan then
-				Pilot.llmErrors = Pilot.llmErrors + 1
-				feed("The AI brain did not answer (" .. trimChars(tostring(err or "no plan"), 60) .. "), playing by instinct")
+			if Keys.free and not Keys.free("world") then
+				-- every key is resting after a rate limit or was used a moment ago: play by instinct instead of hammering the API
+				if os.clock() - (Pilot.restNote or 0) > 40 then
+					Pilot.restNote = os.clock()
+					feed("The AI brain is resting to avoid rate limits (back in about " .. math.ceil(Keys.nextReady("world")) .. " s), playing by instinct")
+				end
 			else
-				Pilot.llmErrors = 0
+				local text, err = llm(msgs, 520, "world")
+				plan = parsePlan(text)
+				if text and not plan and (not Keys.free or Keys.free("world")) then
+					msgs[#msgs + 1] = { role = "assistant", content = text }
+					msgs[#msgs + 1] = { role = "user", content = "Answer ONLY with the JSON plan." }
+					text, err = llm(msgs, 520, "world")
+					plan = parsePlan(text)
+				end
+				if not plan then
+					Pilot.llmErrors = Pilot.llmErrors + 1
+					feed("The AI brain did not answer (" .. trimChars(tostring(err or "no plan"), 60) .. "), playing by instinct")
+				else
+					Pilot.llmErrors = 0
+				end
 			end
 		end
 		local usedLocal = false
@@ -13672,7 +16440,7 @@ Give 1 to 4 steps. Use ids exactly as listed (g1, p2, n1, k1...). If nothing is 
 				elseif Brain.Playbook and select(2, pcall(Brain.Playbook.step)) == true then
 					Pilot.state = "following my game file"
 					changed()
-				elseif nowc - lastPlan >= math.max(1.5, tonumber(cfg.PilotEvery) or 4) then
+				elseif nowc - lastPlan >= math.max(1.5, tonumber(cfg.PilotEvery) or 4) + (Keys.slowSecs and Keys.slowSecs() or 0) then
 					local ok, err = pcall(Pilot.think)
 					lastPlan = os.clock()
 					if not ok then
@@ -15069,7 +17837,8 @@ do
 		end
 		local age = s.modelsAt > 0 and (os.time() - s.modelsAt) or nil
 		local when = age and (age < 120 and "just now" or (math.floor(age / 60) .. " min ago")) or "loading..."
-		return "Detected " .. s.provider .. ". " .. #s.models .. " models, updated " .. when .. ". " .. (s.on and "" or "(switched off) ") .. "Saved as ..." .. s.key:sub(-4)
+		local rest = Keys.restText(i)
+		return "Detected " .. s.provider .. ". " .. #s.models .. " models, updated " .. when .. ". " .. (s.on and "" or "(switched off) ") .. "Saved as ..." .. s.key:sub(-4) .. (rest ~= "" and ("\n" .. rest) or "")
 	end
 
 	refreshKeys = function()
@@ -15180,7 +17949,7 @@ do
 					return
 				end
 				openPicker("Model for key " .. i .. " (" .. s.provider .. ")", s.models, s.model, function(m)
-					s.model = m
+					Keys.pick(i, m)
 					saveCfg()
 					refreshKeys()
 					status("Key " .. i .. " now uses " .. m)
@@ -15260,6 +18029,19 @@ do
 		cfg.ShareLoad = v
 		saveCfg()
 	end)
+	newToggle(rc, "Swap to another model when a key is rate limited", function()
+		return cfg.AutoSwap ~= false
+	end, function(v)
+		cfg.AutoSwap = v
+		saveCfg()
+	end)
+	newToggle(rc, "Space out requests so keys rarely get rate limited", function()
+		return cfg.GentleKeys ~= false
+	end, function(v)
+		cfg.GentleKeys = v
+		saveCfg()
+	end)
+	newLabel(rc, "When a model is rate limited it rests for as long as the company says, and the key tries its next model at once. When 3 keys (or all of yours, if you have fewer) get limited, each of them moves to a different model for good and the AI slows its thinking down for a while. The model you picked comes back by itself when it is allowed again.", { color = T.dim, size = 11 })
 	newLabel(rc, "Free keys: Groq console.groq.com/keys, Gemini aistudio.google.com/apikey, OpenRouter openrouter.ai/keys.", { color = T.dim, size = 11 })
 	refreshKeys()
 end
@@ -16305,18 +19087,21 @@ end
 	local pg = newPage("Play")
 	local P, Check, M = Brain.Pilot, Brain.Check, World.mouse
 	local headLabel, nowLabel, goalLabel, bodyLabel, statLabel, startBtn, pauseBtn, feedLabel, checkLabel, noteBox
-	local playbookLabel, learnedLabel, skillLabel, mapLabel
-	local pill, pillText, pillBtn, legsBtn
+	local playbookLabel, learnedLabel, skillLabel, mapLabel, gearLabel, camLabel, sightLabel
+	local pill, pillText, pillBtn, legsBtn, camBtn
 	local brainPaint
 
 	-- the small bar on screen: always shows what the AI is up to and lets you stop it with one tap
-	pill = mk("Frame", { Name = "Bar", Size = UDim2.fromOffset(348, 30), Position = UDim2.new(0.5, -174, 0, 8), BackgroundColor3 = T.bg, BackgroundTransparency = 0.08, Visible = false, ZIndex = 60 }, Gui)
+	pill = mk("Frame", { Name = "Bar", Size = UDim2.fromOffset(424, 30), Position = UDim2.new(0.5, -212, 0, 8), BackgroundColor3 = T.bg, BackgroundTransparency = 0.08, Visible = false, ZIndex = 60 }, Gui)
 	round(pill, 15)
 	mk("UIStroke", { Color = T.accent, Transparency = 0.2, Thickness = 1 }, pill)
-	pillText = mk("TextLabel", { Size = UDim2.new(1, -168, 1, 0), Position = UDim2.fromOffset(12, 0), BackgroundTransparency = 1, Text = "", TextXAlignment = Enum.TextXAlignment.Left, Font = Enum.Font.GothamMedium, TextSize = 11, TextColor3 = T.text, TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 61 }, pill)
+	pillText = mk("TextLabel", { Size = UDim2.new(1, -250, 1, 0), Position = UDim2.fromOffset(12, 0), BackgroundTransparency = 1, Text = "", TextXAlignment = Enum.TextXAlignment.Left, Font = Enum.Font.GothamMedium, TextSize = 11, TextColor3 = T.text, TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 61 }, pill)
 	-- walking switch on the bar: you can take the steering back without opening the window
 	legsBtn = mk("TextButton", { Name = "LegsBtn", Size = UDim2.fromOffset(80, 22), Position = UDim2.new(1, -158, 0.5, -11), BackgroundColor3 = T.accent, Text = "WALK ON", Font = Enum.Font.GothamBold, TextSize = 11, TextColor3 = T.text, AutoButtonColor = false, ZIndex = 62 }, pill)
 	round(legsBtn, 11)
+	-- camera switch on the bar: the AI turning the view can be stopped with one tap while you play
+	camBtn = mk("TextButton", { Name = "CamBtn", Size = UDim2.fromOffset(70, 22), Position = UDim2.new(1, -234, 0.5, -11), BackgroundColor3 = T.accent, Text = "CAM ON", Font = Enum.Font.GothamBold, TextSize = 11, TextColor3 = T.text, AutoButtonColor = false, ZIndex = 62 }, pill)
+	round(camBtn, 11)
 	pillBtn = mk("TextButton", { Size = UDim2.fromOffset(70, 22), Position = UDim2.new(1, -76, 0.5, -11), BackgroundColor3 = T.danger, Text = "PAUSE", Font = Enum.Font.GothamBold, TextSize = 11, TextColor3 = T.text, AutoButtonColor = false, ZIndex = 62 }, pill)
 	round(pillBtn, 11)
 	draggable(pillText, pill)
@@ -16368,11 +19153,27 @@ end
 			local mp = Brain.Terrain and Brain.Terrain.summary() or ""
 			local sv = Brain.Survive and Brain.Survive.text() or ""
 			mapLabel.Text = (mp ~= "" and mp or "Map: not scanned yet") .. (sv ~= "" and ("\n" .. sv) or "")
+			if gearLabel then
+				local gl = Brain.Gear and Brain.Gear.summary() or {}
+				local kl = Brain.Killers and Brain.Killers.summary() or ""
+				gearLabel.Text = "Inventory (what each tool is for):\n" .. (#gl > 0 and table.concat(gl, "\n", 1, math.min(#gl, 8)) or "nothing in the backpack") .. (kl ~= "" and ("\nKill bricks: " .. kl) or "")
+				sightLabel.Text = "Sight: " .. (Brain.Vision and Brain.Vision.summary() or "off")
+				camLabel.Text = "Camera: " .. (Brain.Camera and (Brain.Camera.status() .. "  (" .. Brain.Camera.summary() .. ")") or "off")
+			end
 		end
 		local legsOn = cfg.Legs ~= false
+		local camOn = cfg.AICamera ~= false
+		camBtn.Text = camOn and "CAM ON" or "CAM OFF"
+		camBtn.BackgroundColor3 = camOn and T.accent or T.off
 		pill.Visible = Core.on() and cfg.Pill ~= false and (s.active or cfg.FreeWill or cfg.AutoWalk)
 		if s.active then
 			pillText.Text = "Sapphire Zene  |  " .. (s.paused and "paused" or (s.goal ~= "" and s.goal or tostring(s.state)))
+			if camOn and cfg.ShowGaze ~= false and Brain.Camera and not s.paused then
+				local cs = Brain.Camera.status()
+				if cs:sub(1, 7) == "looking" then
+					pillText.Text = pillText.Text .. "  |  " .. cs
+				end
+			end
 		else
 			pillText.Text = "Sapphire Zene  |  " .. (legsOn and "may wander by itself" or "you walk")
 		end
@@ -16397,6 +19198,17 @@ end
 	track(legsBtn.Activated:Connect(function()
 		guard(function()
 			Core.Legs.set(cfg.Legs == false)
+			refresh(true)
+		end)
+	end))
+	track(camBtn.Activated:Connect(function()
+		guard(function()
+			if Brain.Camera then
+				Brain.Camera.set(cfg.AICamera == false)
+			else
+				cfg.AICamera = cfg.AICamera == false
+			end
+			saveCfg()
 			refresh(true)
 		end)
 	end))
@@ -16535,10 +19347,55 @@ end
 		cfg.Parkour = v
 		saveCfg()
 	end)
+	newToggle(lc, "Sight (checks the map first: never walks at what is behind a wall, too high or across a gap)", function()
+		return cfg.Sight ~= false
+	end, function(v)
+		cfg.Sight = v
+		saveCfg()
+		if Brain.Vision then
+			Brain.Vision.reset()
+		end
+	end)
+	newToggle(lc, "Learn kill bricks (a part that hurts when touched is remembered and walked around)", function()
+		return cfg.LearnKillers ~= false
+	end, function(v)
+		cfg.LearnKillers = v
+		saveCfg()
+		if Brain.Terrain then
+			Brain.Terrain.G = nil
+		end
+	end)
+	newToggle(lc, "Smart gear (holds the right tool: sword up close, bow far away, pickaxe at ore, key at doors, light in the dark)", function()
+		return cfg.SmartGear ~= false
+	end, function(v)
+		cfg.SmartGear = v
+		saveCfg()
+	end)
+	newToggle(lc, "AI camera (turns the view to what it needs to see: the fight, ledges, walls, where it goes)", function()
+		return cfg.AICamera ~= false
+	end, function(v)
+		if Brain.Camera then
+			Brain.Camera.set(v)
+		else
+			cfg.AICamera = v
+		end
+		saveCfg()
+		refresh(true)
+	end)
+	newToggle(lc, "Show where it is looking (a ring and a thin line in the world, and the name on the top bar)", function()
+		return cfg.ShowGaze ~= false
+	end, function(v)
+		cfg.ShowGaze = v
+		saveCfg()
+		refresh(true)
+	end)
 	playbookLabel = newLabel(lc, "", { size = 11, color = T.accentText })
 	learnedLabel = newLabel(lc, "", { size = 11, color = T.dim })
 	skillLabel = newLabel(lc, "", { size = 11, color = T.dim })
 	mapLabel = newLabel(lc, "", { size = 11, color = T.dim })
+	gearLabel = newLabel(lc, "", { size = 11, color = T.dim })
+	sightLabel = newLabel(lc, "", { size = 11, color = T.dim })
+	camLabel = newLabel(lc, "", { size = 11, color = T.dim })
 	local lr = newRow(lc)
 	rowButton(lr, 2, "Forget buttons", function()
 		if Brain.Playbook then
@@ -16552,6 +19409,21 @@ end
 			Brain.Skills.forget()
 		end
 		status("It will look for skills again")
+		refresh(true)
+	end)
+	local lr2 = newRow(lc)
+	rowButton(lr2, 2, "Forget kill bricks", function()
+		if Brain.Killers then
+			Brain.Killers.forget()
+		end
+		status("It forgot which parts hurt in this game, it learns them again by touching them")
+		refresh(true)
+	end)
+	rowButton(lr2, 2, "Forget gear", function()
+		if Brain.Gear then
+			Brain.Gear.forget()
+		end
+		status("It will work out what each tool is for again")
 		refresh(true)
 	end)
 
