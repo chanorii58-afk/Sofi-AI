@@ -1,5 +1,5 @@
 --[[
-	SAPPHIRE ZENE v4.3  -  an AI that plays Roblox games (built for Delta / mobile)
+	SAPPHIRE ZENE v4.4  -  an AI that plays Roblox games (built for Delta / mobile)
 
 	* Plays on its own like a real player: moves because it has a reason, runs from danger, fights,
 	  collects, talks to NPCs, presses the game's buttons with a visible cursor and tap dots
@@ -22,8 +22,22 @@
 	  right one: sword up close, bow far away, the pickaxe at ore, the key at doors, a light in the dark; learns which tools hurt
 	* v4.3 AI camera: turns the view to what it needs to see (the fight, a threat, the ledge or wall ahead, where it goes, a look
 	  around when idle), shows where it looks (ring + line + the bar), lets go when you drag the screen; CAM ON / OFF on the bar
+	* v4.4 Orders come first: "go inside the house", "parkour", "kill the zombies", "collect coins", "stay here", "continue" are obeyed
+	  before its own will, and a new order replaces the old one at the next step
+	* v4.4 Never tries the same dead end twice: anything that asks for Robux, a gamepass, VIP or a level it does not have is written
+	  down as blocked (for a while or for good) and left alone; it never spends Robux
+	* v4.4 Fights by the numbers: learns how hard each enemy hits and how long it takes to kill, fights back when armed and
+	  winning, runs when it is losing or low on health, and when it has no weapon it runs to a free one; reloads guns
+	* v4.4 Moves without stop-and-go: no bunny hopping, goes in through the doorway of a house, tells the games apart
+	* v4.4 Parkour: runs at the edge of a pillar, jumps from the very edge, keeps running in the air, lands on the next one;
+	  climbs staircases of floating blocks and zig-zags; knows what it cannot cross and does not try
+	* v4.4 3D eyes: sees the real size of every box around it (floors, walls, roofs, pillars, furniture, loose things), the buildings they
+	  make, where the edge of what it stands on is (to the tenth of a stud), and the openings: doorways, windows and holes in floors
+	  and roofs, which ones a body fits through and which need a jump; goes in through a window or a hatch when there is no door
+	* v4.4 "Show how it sees" (Play tab): boxes drawn over the world, blue floors, orange walls, purple roofs, green furniture, yellow
+	  loose things, red danger, green frames = openings it can use, red frames = too small, red dots = edges
 	* Chats when someone says its name (Sapphire Zene) or yours (warmachine12908), or everyone (Settings)
-	* Free API keys: Groq, Gemini, OpenRouter, Cerebras, NVIDIA, HuggingFace (Keys tab, up to 4)
+	* Free API keys: Groq, Gemini, OpenRouter, Cerebras, NVIDIA, HuggingFace (Keys tab, up to 8)
 	* Knowledge, Triggers, Memory, Coding and Ask AI tabs, Smart mode with emotions
 	* Play tab: start / pause, what it is doing and why, self-check - you only moderate
 	* ONE brain: the AI ON / AI OFF button (top of the window) stops walking, playing, cursor, chat and scanning together
@@ -37,10 +51,10 @@
 	You can also paste the key into PRESET_KEYS below.
 ]]
 
-local PRESET_KEYS = { "", "", "", "" } -- optional: paste up to 4 API keys here (you can also use the Keys tab)
+local PRESET_KEYS = { "", "", "", "" } -- optional: paste up to 8 API keys here (you can also use the Keys tab)
 local CAP_CHAT, CAP_TRIGGER, CAP_SMART, CAP_ASK, CAP_WORLD = 6000, 5500, 7000, 2000, 99999999
 local DIR = "SofiAI" -- data folder name stays the same on purpose: your files never reset
-local VERSION = "4.3"
+local VERSION = "4.4"
 
 local Players = game:GetService("Players")
 local HttpService = game:GetService("HttpService")
@@ -823,8 +837,15 @@ local Default = {
 	SmartGear = true,
 	AICamera = true,
 	ShowGaze = true,
+	KeepMoving = true,
+	Orders = true,
+	Combat = true,
+	FightBack = true,
+	Openings = true, -- it sees doorways, windows and holes in walls and floors and uses them
+	SeeBoxes = false, -- draw what it sees in the world (boxes, edges, openings)
 	}
-for i = 1, 4 do
+local MAXSLOTS = 8 -- how many API keys can work together
+for i = 1, MAXSLOTS do
 	Default.Slots[i] = { key = "", provider = "", model = "", home = "", models = {}, modelsAt = 0, on = true }
 end
 local DICT = { Roles = true }
@@ -861,26 +882,26 @@ do
 				local model = type(saved.Models) == "table" and saved.Models[prov] or ""
 				cfg.Slots[i] = { key = saved.Keys[prov], provider = prov, model = tostring(model or ""), home = tostring(model or ""), models = {}, modelsAt = 0, on = true }
 			end
-			cfg.SlotCount = math.max(1, math.min(4, #order))
+			cfg.SlotCount = math.max(1, math.min(MAXSLOTS, #order))
 		end
 	end
 	if type(cfg.Slots) ~= "table" then
 		cfg.Slots = {}
 	end
-	for i = 1, 4 do
+	for i = 1, MAXSLOTS do
 		local s = type(cfg.Slots[i]) == "table" and cfg.Slots[i] or {}
 		local key = tostring(s.key or "")
 		local prov = (Providers[s.provider or ""] and s.provider) or (key ~= "" and detectProvider(key)) or ""
 		cfg.Slots[i] = { key = key, provider = prov, model = tostring(s.model or ""), home = tostring(s.home or ""), models = type(s.models) == "table" and s.models or {}, modelsAt = tonumber(s.modelsAt) or 0, on = s.on ~= false }
 	end
 	for i, k in ipairs(PRESET_KEYS) do
-		if i <= 4 and type(k) == "string" and k ~= "" and cfg.Slots[i].key == "" then
+		if i <= MAXSLOTS and type(k) == "string" and k ~= "" and cfg.Slots[i].key == "" then
 			cfg.Slots[i].key = k
 			cfg.Slots[i].provider = detectProvider(k) or ""
 		end
 	end
-	cfg.SlotCount = math.max(1, math.min(4, tonumber(cfg.SlotCount) or 1))
-	for i = 1, 4 do
+	cfg.SlotCount = math.max(1, math.min(MAXSLOTS, tonumber(cfg.SlotCount) or 1))
+	for i = 1, MAXSLOTS do
 		local s = cfg.Slots[i]
 		if s.provider ~= "" and s.model == "" then
 			s.model = Providers[s.provider].default
@@ -894,7 +915,7 @@ do
 	end
 	for _, r in ipairs({ "main", "coding", "ask", "world" }) do
 		local v = tonumber(cfg.Roles[r]) or 1
-		cfg.Roles[r] = (v >= 1 and v <= 4) and math.floor(v) or 1
+		cfg.Roles[r] = (v >= 1 and v <= MAXSLOTS) and math.floor(v) or 1
 	end
 	if not cfg.PersonaV4 then
 		-- one time: anyone still on the stock Friendly prompt moves to the new Sapphire Zene one (edited prompts stay)
@@ -1759,12 +1780,46 @@ end
 		hum:MoveTo(pos)
 		return true
 	end
-	function Legs.jump(hum)
+	-- one jump. "force" = it is needed (an obstacle in the way, a gap, a ledge, stuck, standing up, an order); anything else is casual and rationed,
+	-- so it never hops along the ground every second. Never while in the air (Jump stays set and fires again on landing = bunny hop).
+	Legs.jumpLog, Legs.jumpsSkipped, Legs.lastJump, Legs.jumps = {}, 0, -99, 0
+	function Legs.jump(hum, force)
 		if not Legs.can() then
 			Legs.blocked = Legs.blocked + 1
 			return false
 		end
-		Legs.aiAt, Legs.driving = os.clock(), true
+		local now = os.clock()
+		local air = false
+		pcall(function()
+			if Enum.Material and hum.FloorMaterial == Enum.Material.Air then
+				air = true
+			end
+			local st = hum:GetState()
+			if st == Enum.HumanoidStateType.Swimming or st == Enum.HumanoidStateType.Climbing then
+				air = false
+			end
+		end)
+		if air or now - Legs.lastJump < (force and 0.4 or 1.0) then
+			Legs.jumpsSkipped = Legs.jumpsSkipped + 1
+			return false
+		end
+		if not force then
+			local keep = {}
+			for _, t in ipairs(Legs.jumpLog) do
+				if now - t < 12 then
+					keep[#keep + 1] = t
+				end
+			end
+			Legs.jumpLog = keep
+			if #keep >= 3 or (#keep > 0 and now - keep[#keep] < 2.5) then
+				Legs.jumpsSkipped = Legs.jumpsSkipped + 1
+				return false
+			end
+			keep[#keep + 1] = now
+		end
+		Legs.lastJump = now
+		Legs.jumps = Legs.jumps + 1
+		Legs.aiAt, Legs.driving = now, true
 		hum.Jump = true
 		return true
 	end
@@ -1772,7 +1827,7 @@ end
 	function Legs.standUp(hum)
 		if hum.SeatPart and Legs.can() then
 			hum.Sit = false
-			Legs.jump(hum)
+			Legs.jump(hum, true)
 			return true
 		end
 		return false
@@ -2035,7 +2090,7 @@ local function extractUrls(s)
 	return urls
 end
 
------------------------------------------------------------------- LLM + API key manager (up to 4 keys working together)
+------------------------------------------------------------------ LLM + API key manager (up to 8 keys working together)
 local function extraParams(prov, model)
 	local m = model:lower()
 	if prov == "Groq" and m:find("gpt%-oss") then
@@ -2387,7 +2442,7 @@ do
 
 	function Keys.active()
 		local l = {}
-		for i = 1, 4 do
+		for i = 1, MAXSLOTS do
 			local s = cfg.Slots[i]
 			if s.on and s.key ~= "" and s.provider ~= "" and not (bad[i] and os.clock() - bad[i] < 300) then
 				l[#l + 1] = i
@@ -2771,7 +2826,7 @@ do
 	-- keeps every key's model list fresh without you doing anything
 	task.spawn(function()
 		while Alive do
-			for i = 1, 4 do
+			for i = 1, MAXSLOTS do
 				local s = cfg.Slots[i]
 				if Core.on() and s.key ~= "" and s.provider ~= "" and (#s.models == 0 or os.time() - s.modelsAt > 3600 or Keys.badModel(s.model)) then
 					local ok, msg, fresh = Keys.refresh(i)
@@ -5056,11 +5111,13 @@ end
 		local p, s2 = obj.AbsolutePosition, obj.AbsoluteSize
 		return x >= p.X and x <= p.X + s2.X and y >= p.Y and y <= p.Y + s2.Y
 	end
+	M.ghostHeld = {}
 	function M.ghostBegin(x, y)
 		local hid = {}
 		for _, o in ipairs(M.shields or {}) do
 			if rectHas(o, x, y) then
 				o.Visible = false
+				M.ghostHeld[o] = true -- other threads redrawing the bar must not bring it back while the tap lands
 				hid[#hid + 1] = o
 			end
 		end
@@ -5071,6 +5128,7 @@ end
 	end
 	function M.ghostEnd(hid)
 		for _, o in ipairs(hid or {}) do
+			M.ghostHeld[o] = nil
 			pcall(function()
 				o.Visible = true
 			end)
@@ -5576,9 +5634,12 @@ end
 
 	------------------------------------------------------------ what the AI can point at
 	-- ids: g button on screen, p prompt, c clickable, s seat, m building or object in the world
-	function M.targets(quiet)
+	function M.targets(quiet, all)
 		local list, byId, n = {}, {}, { g = 0, p = 0, c = 0, s = 0, m = 0, r = 0, u = 0 }
 		local function add(pre, t)
+			if not all and Brain.Ledger and Brain.Ledger.blockedTarget(t) then
+				return -- known not to work (costs Robux, locked, did nothing): it is not offered as a choice
+			end
 			n[pre] = n[pre] + 1
 			t.id = pre .. n[pre]
 			list[#list + 1] = t
@@ -5699,7 +5760,7 @@ end
 		local d = tostring(a["do"] or a.action or ""):lower()
 		local alias = { leftclick = "click", left = "click", rightclick = "rightclick", right = "rightclick", doubleclick = "doubleclick", double = "doubleclick", move = "move", hover = "move", drag = "drag", scroll = "scroll", wait = "wait", face = "face", walk = "walk", interact = "click", press = "click", tap = "click", jump = "jump", equip = "equip", use = "use", activate = "use", key = "key" }
 		d = alias[d] or d
-		local tgt = a.target and (M.byId[tostring(a.target)] or M.extra[tostring(a.target)]) or nil
+		local tgt = a.tgt or (a.target and (M.byId[tostring(a.target)] or M.extra[tostring(a.target)])) or nil
 		if a.target and not tgt then
 			return "unknown target " .. tostring(a.target)
 		end
@@ -5728,6 +5789,13 @@ end
 			if ctx.auto and autoRiskyText(tgt.label) then
 				return "skipped: I won't do that on my own (" .. tgt.label .. ")"
 			end
+			if ctx.auto and Brain.Ledger then
+				local blk, bwhy = Brain.Ledger.blockedTarget(tgt)
+				if blk then
+					Brain.Ledger.stats.skipped = Brain.Ledger.stats.skipped + 1
+					return "skipped: " .. tgt.label .. " is known not to work (" .. tostring(bwhy) .. ")"
+				end
+			end
 			x, y = M.screenOf(tgt)
 		end
 		local humA = lp.Character and lp.Character:FindFirstChildOfClass("Humanoid")
@@ -5739,7 +5807,7 @@ end
 				if humA.SeatPart then
 					humA.Sit = false
 				end
-				Core.Legs.jump(humA)
+				Core.Legs.jump(humA, true)
 			end
 			return "jumped"
 		end
@@ -7038,7 +7106,7 @@ do
 		end
 		if hum.SeatPart then
 			hum.Sit = false
-			Core.Legs.jump(hum)
+			Core.Legs.jump(hum, true)
 			task.wait(0.4)
 		end
 		Walk.busy, Walk.cancel = true, false
@@ -7065,7 +7133,7 @@ do
 							break
 						end
 						if wp.Action == Enum.PathWaypointAction.Jump then
-							Core.Legs.jump(hum)
+							Core.Legs.jump(hum, true)
 						end
 						Core.Legs.moveTo(hum, wp.Position)
 						local s0 = os.clock()
@@ -7084,7 +7152,7 @@ do
 				if (root.Position - lastPos).Magnitude < 0.4 then
 					stuck = stuck + 1
 					if stuck >= 4 then
-						Core.Legs.jump(hum)
+						Core.Legs.jump(hum, true)
 						stuck = 0
 					end
 				else
@@ -7320,7 +7388,7 @@ do
 									end
 									Core.Legs.moveTo(hum, root.Position + perp * 8)
 									if part.Position.Y < root.Position.Y - 1 then
-										Core.Legs.jump(hum)
+										Core.Legs.jump(hum, true)
 									end
 									lastDodge = now
 									Reflex.dodges = Reflex.dodges + 1
@@ -7348,7 +7416,7 @@ do
 		local info = look(root, char, fwd)
 		if info.foot and not info.chest and not info.head then
 			if now - lastJump > 0.45 then
-				Core.Legs.jump(hum)
+				Core.Legs.jump(hum, true)
 				lastJump = now
 				Reflex.jumps = Reflex.jumps + 1
 				Reflex.note = "jumped over a low block"
@@ -7367,7 +7435,7 @@ do
 					end
 				end
 				if now - lastJump > 0.45 then
-					Core.Legs.jump(hum)
+					Core.Legs.jump(hum, true)
 					lastJump = now
 					Reflex.jumps = Reflex.jumps + 1
 					Reflex.note = "jumped at a wall"
@@ -7375,7 +7443,7 @@ do
 			end
 		elseif info.gap and now - lastJump > 0.45 then
 			if info.across then
-				Core.Legs.jump(hum)
+				Core.Legs.jump(hum, true)
 				lastJump = now
 				Reflex.jumps = Reflex.jumps + 1
 				Reflex.note = "jumped across a gap"
@@ -7780,7 +7848,7 @@ end
 	local function newKnow()
 		-- moves: what its body can do here; safe: which way of escaping worked against what; skills: what each skill does; spots: safe places it found;
 		-- acts: cause and effect it learned or was told: what pressing a button / collecting / fighting something does, and how often it worked
-		return { summary = "", objective = "", mechanics = {}, threats = {}, prey = {}, collect = {}, hazards = {}, goals = {}, tips = {}, gui = {}, acts = {}, places = {}, moves = {}, safe = {}, skills = {}, spots = {}, killers = {}, gear = {} }
+		return { summary = "", objective = "", mechanics = {}, threats = {}, prey = {}, collect = {}, hazards = {}, goals = {}, tips = {}, gui = {}, acts = {}, places = {}, moves = {}, safe = {}, skills = {}, spots = {}, killers = {}, gear = {}, combat = {}, blocked = {} }
 	end
 	local function fix(g)
 		g.name = tostring(g.name or "Game")
@@ -8499,6 +8567,35 @@ threats: things that hurt or kill the player, or that the notes say to avoid or 
 	function Games.noteCollect(name, why, src)
 		return noteList("collect", name, why, src)
 	end
+	-- the names of the OTHER games it has a file for (only whole names of 5+ letters count)
+	function Games.otherNames()
+		local out, me = {}, Games.currentId()
+		for id, g in pairs(DB.games) do
+			if id ~= me and type(g.name) == "string" and #g.name >= 5 and not g.name:find("^Place %d") and not g.name:find("^Game %d") then
+				out[#out + 1] = g.name:lower()
+			end
+		end
+		return out
+	end
+	-- a line that talks about another game is not a fact about this one (the AI mixed two games up): true when it mentions one
+	function Games.mentionsOther(text)
+		local low = tostring(text or ""):lower()
+		local g = Games.cur(false)
+		local mine = g and g.name:lower() or ""
+		for _, n in ipairs(Games.otherNames()) do
+			if n ~= mine and not mine:find(n, 1, true) and low:find(n, 1, true) then
+				return n
+			end
+		end
+		return nil
+	end
+	-- who it is playing right now, said plainly in every prompt
+	function Games.identity()
+		local g = Games.cur(false)
+		local name, id = g and g.name or "this game", Games.currentId()
+		local uni = uniNow()
+		return ('GAME IDENTITY: you are playing "%s" (place id %s%s). This is NOT any other game you have played before. Do not assume its mechanics, items, enemies, buttons or goals are the same as another game: only what is in this game file or what you can see on the screen right now is true here. Anything else is unknown until you try it and watch what happens.'):format(name, id, uni and (", universe " .. uni) or "")
+	end
 	function Games.addTo(listName, text, cap)
 		local g = Games.cur()
 		if not g then
@@ -8508,6 +8605,9 @@ threats: things that hurt or kill the player, or that the notes say to avoid or 
 		text = trimChars(oneLine(tostring(text or "")), 140)
 		if #text < 6 then
 			return false
+		end
+		if Games.mentionsOther(text) then
+			return false -- it names another game: not a fact about this one
 		end
 		local kw = keywords(text)
 		for _, it in ipairs(list) do
@@ -8710,7 +8810,7 @@ threats: things that hurt or kill the player, or that the notes say to avoid or 
 			return ""
 		end
 		budget = budget or 2200
-		local L = { "GAME FILE: " .. g.name }
+		local L = { Games.identity(), "GAME FILE: " .. g.name }
 		if trim(g.prompt) ~= "" then
 			L[#L + 1] = "The owner wrote this for this game. Follow it with your own judgement, it is guidance and not a script:\n" .. trimChars(g.prompt, 1400)
 		end
@@ -8856,6 +8956,9 @@ Rules: "gui" lists the buttons of the game screen the player should know, with t
 			end
 		end
 		local L = { "Game: " .. g.name }
+		if live then
+			table.insert(L, 1, Games.identity())
+		end
 		if desc ~= "" then
 			L[#L + 1] = "Roblox description: " .. trimChars(desc, 500)
 		end
@@ -9447,6 +9550,9 @@ end)()
 					level = 1
 				end
 				why = "it hurt me before"
+				if level > 0 and Brain.Combat and Brain.Combat.mayStand(e) then
+					level = 0 -- armed and stronger: it is fought, not fled from
+				end
 			elseif hostileWord(e.set) and not Games.matchList(Games.preyList(), e.set) then
 				if e.dist < 8 or (e.closing > 6 and e.dist < 28) then
 					level = 2
@@ -9454,9 +9560,18 @@ end)()
 					level = 1
 				end
 				why = "looks hostile (" .. hostileWord(e.set) .. ")"
+				if level > 0 and Brain.Combat and Brain.Combat.mayStand(e) then
+					level = 0
+				end
 			end
-			if fighting and myFrac > 0.45 then
-				level = 0
+			if fighting then
+				if Brain.Combat and Brain.Combat.running and e.hum then
+					if not Brain.Combat.shouldRetreat(hum, e.hum, e.name) then
+						level = 0
+					end
+				elseif myFrac > 0.45 then
+					level = 0
+				end
 			end
 			if level > 0 then
 				out[#out + 1] = { model = e.model, name = e.disp, raw = e.name, pos = e.pos, dist = e.dist, closing = e.closing, speed = e.speed, hp = e.hp, level = level, why = why, set = e.set, rec = rec }
@@ -9548,6 +9663,12 @@ end)()
 		Threat.hurtBy[key] = (Threat.hurtBy[key] or 0) + 1
 		local fighting = Body.target == model
 		local frac = maxhp > 0 and hp / maxhp or 1
+		if Brain.Combat then
+			pcall(Brain.Combat.onHit, drop, cause, model, best)
+			if not fighting and Threat.enabled() then
+				pcall(Brain.Combat.react, model, cause, best, drop)
+			end
+		end
 		if (Threat.hurtBy[key] >= 2 or drop >= maxhp * 0.25) and (not fighting or frac < 0.4) then
 			local rec = Games.noteThreat(cause, "it hurt me " .. Threat.hurtBy[key] .. " times", "damage", true)
 			if rec and Threat.hurtBy[key] == 2 then
@@ -9714,7 +9835,7 @@ end)()
 	local function standUp(hum)
 		if hum.SeatPart and Legs.can() then
 			hum.Sit = false
-			Legs.jump(hum)
+			Legs.jump(hum, true)
 			task.wait(0.4)
 		end
 	end
@@ -9746,6 +9867,22 @@ end)()
 		if not Legs.can() then
 			return
 		end
+		-- not over and over: a short step, then a longer one when it keeps happening (the damage is not from here, it is from the area)
+		local nowS = os.clock()
+		if nowS - (Body.lastSide or -99) < 1.6 then
+			return
+		end
+		Body.lastSide = nowS
+		Body.sideLog = Body.sideLog or {}
+		local keepS = {}
+		for _, t in ipairs(Body.sideLog) do
+			if nowS - t < 20 then
+				keepS[#keepS + 1] = t
+			end
+		end
+		keepS[#keepS + 1] = nowS
+		Body.sideLog = keepS
+		local stepLen = #keepS >= 3 and 24 or 10
 		local tok = Body.newToken()
 		Body.fleeing = true
 		Body.now = "stepping away"
@@ -9758,10 +9895,10 @@ end)()
 		end
 		local best, bs
 		for _, dir in ipairs(spots) do
-			local dest = root.Position + dir * 10
+			local dest = root.Position + dir * stepLen
 			local fl, hz = floorInfo(dest, char)
 			local sc = (fl and not hz) and 5 or -50
-			if solid(ray(root.Position + Vector3.new(0, 0.5, 0), dir * 10, rp)) then
+			if solid(ray(root.Position + Vector3.new(0, 0.5, 0), dir * stepLen, rp)) then
 				sc = sc - 20
 			end
 			if Body.lastSafe then
@@ -9772,9 +9909,9 @@ end)()
 			end
 		end
 		Legs.jump(hum)
-		Legs.moveTo(hum, root.Position + best * 10)
+		Legs.moveTo(hum, root.Position + best * stepLen)
 		local t0 = os.clock()
-		while Alive and tok == Body.token and os.clock() - t0 < 1.4 do
+		while Alive and tok == Body.token and os.clock() - t0 < (stepLen > 10 and 2.6 or 1.4) do
 			task.wait(0.2)
 		end
 		if tok == Body.token then
@@ -9885,6 +10022,9 @@ end)()
 
 	-- run from danger: reads the map, picks the way out that works (run, climb, hide, or grab the coin first), and keeps re-deciding
 	function Body.flee(top)
+		if Brain.Combat and Brain.Combat.fleeToWeapon and Brain.Combat.fleeToWeapon(top) then
+			return
+		end
 		if cfg.SmartFlee ~= false and Brain.Survive and Brain.Terrain then
 			return Brain.Survive.run(top)
 		end
@@ -9903,6 +10043,7 @@ end)()
 			return "legsoff"
 		end
 		local tok = Body.newToken()
+		Body.owner, Body.ownerTok = o.owner, tok -- who asked for this walk (a stroll while thinking can be cut short, nothing else)
 		Body.target = nil
 		standUp(hum)
 		local label = o.label or "a spot"
@@ -10100,7 +10241,7 @@ end)()
 					else
 						local info, rp = look(root, char, fwd.Unit)
 						if info.foot and not info.chest and not info.head then
-							Legs.jump(hum)
+							Legs.jump(hum, true)
 							Body.stats.jumps = Body.stats.jumps + 1
 						elseif info.chest or info.head then
 							local side, s = pickSide(root, fwd.Unit, rp, sideDir)
@@ -10136,7 +10277,7 @@ end)()
 					stage = stage + 1
 					Body.stats.stuck = Body.stats.stuck + 1
 					if stage == 1 then
-						Legs.jump(hum)
+						Legs.jump(hum, true)
 					elseif stage == 2 then
 						local f2 = Vector3.new(dest.X - root.Position.X, 0, dest.Z - root.Position.Z)
 						if f2.Magnitude > 0.5 then
@@ -10156,7 +10297,7 @@ end)()
 					else
 						fails = fails + 1
 						sideDir = -sideDir
-						Legs.jump(hum)
+						Legs.jump(hum, true)
 						stage = 1
 						if fails >= 4 then
 							result = "stuck"
@@ -10296,9 +10437,18 @@ end)()
 				result = "lost"
 				break
 			end
-			if hum.MaxHealth > 0 and hum.Health / hum.MaxHealth < 0.3 and not o.reckless then
-				result = "retreat"
-				break
+			if not o.reckless then
+				local back, bwhy
+				if Brain.Combat then
+					back, bwhy = Brain.Combat.shouldRetreat(hum, th, name)
+				else
+					back = hum.MaxHealth > 0 and hum.Health / hum.MaxHealth < 0.3
+				end
+				if back then
+					Body.lastWhy = bwhy
+					result = "retreat"
+					break
+				end
 			end
 			if Brain.Gear and cfg.SmartGear ~= false and os.clock() - lastGear > 1.2 then
 				-- the distance changed: the bow far away, the sword up close
@@ -10353,6 +10503,9 @@ end)()
 				end
 				if Brain.Gear and tool and tool.Parent == char then
 					pcall(Brain.Gear.learnSwing, tool, (th and lastHp and th.Health < lastHp) and (lastHp - th.Health) or 0, d)
+					if Brain.Combat then
+						pcall(Brain.Combat.noteSwing, tool, model and model.Name or name, (th and lastHp and th.Health < lastHp) and (lastHp - th.Health) or 0, th and th.MaxHealth)
+					end
 				end
 				lastHp = th and th.Health or lastHp
 			end
@@ -10399,12 +10552,23 @@ end)()
 				return v
 			end
 		end
+		return Body.pickAround(root.Position, 28, 78, 22)
+	end
+	-- somewhere between dmin and dmax studs from a centre: safe floor, away from danger, unvisited if possible, reachable on the map
+	function Body.pickAround(center, dmin, dmax, tries, level)
+		local char, root = parts()
+		if not root then
+			return nil
+		end
 		local rp = rparams(char)
 		local best, bs
-		for _ = 1, 22 do
-			local ang, d = math.random() * math.pi * 2, 28 + math.random() * 50
-			local dest = root.Position + Vector3.new(math.cos(ang) * d, 0, math.sin(ang) * d)
+		for _ = 1, tries or 22 do
+			local ang, d = math.random() * math.pi * 2, dmin + math.random() * (dmax - dmin)
+			local dest = center + Vector3.new(math.cos(ang) * d, 0, math.sin(ang) * d)
 			local fl, hz = floorInfo(dest, char)
+			if fl and not hz and level and math.abs(fl.Position.Y - (root.Position.Y - 3)) > level then
+				fl = nil -- a stroll stays on the level it is on: it does not step off a pillar or a roof to wander
+			end
 			if fl and not hz then
 				local ok = true
 				for _, th in ipairs(Threat.list or {}) do
@@ -10412,25 +10576,40 @@ end)()
 						ok = false
 					end
 				end
+				local spot = Vector3.new(dest.X, fl.Position.Y + 3, dest.Z)
+				if ok and center ~= root.Position and Brain.Vision and cfg.Sight ~= false and not Brain.Vision.ok(spot) then
+					ok = false
+				end
 				if ok then
 					local vis = Body.visited[cell(dest)] or 0
-					local dir = (dest - root.Position)
-					dir = Vector3.new(dir.X, 0, dir.Z).Unit
-					local sc = (vis == 0 and 3 or -vis * 0.4) + (solid(ray(root.Position + Vector3.new(0, 0.5, 0), dir * math.min(d, 30), rp)) and 0 or 1) + math.random() * 0.5
+					local dir = Vector3.new(dest.X - root.Position.X, 0, dest.Z - root.Position.Z)
+					local clear = 0
+					if dir.Magnitude > 1 then
+						clear = solid(ray(root.Position + Vector3.new(0, 0.5, 0), dir.Unit * math.min(dir.Magnitude, 30), rp)) and 0 or 1
+					end
+					local sc = (vis == 0 and 3 or -vis * 0.4) + clear + math.random() * 0.5
 					if not bs or sc > bs then
-						best, bs = Vector3.new(dest.X, fl.Position.Y + 3, dest.Z), sc
+						best, bs = spot, sc
 					end
 				end
 			end
 		end
 		return best
 	end
-	function Body.explore(why)
+	-- a short walk close to where it was last busy (it does not wander off while it thinks)
+	function Body.patrol(center, why, timeout, owner)
+		local dest = Body.pickAround(center, 5, 14, 16, 5)
+		if not dest then
+			return "nowhere"
+		end
+		return Body.goto(dest, { label = "around here", why = why or "looking around", timeout = timeout or 7, owner = owner, within = 3 })
+	end
+	function Body.explore(why, timeout, owner)
 		local dest = Body.pickExplore()
 		if not dest then
 			return "nowhere"
 		end
-		return Body.goto(dest, { label = "somewhere new", why = why or "I want to see more of this place", timeout = 25 })
+		return Body.goto(dest, { label = "somewhere new", why = why or "I want to see more of this place", timeout = timeout or 25, owner = owner })
 	end
 	function Body.visitedCount()
 		local n = 0
@@ -10570,6 +10749,12 @@ end)()
 		local t1 = (c.vy0 - math.sqrt(disc)) / c.g
 		return math.clamp(1.0 + c.v * t1 + 0.5, 1.6, 5.5)
 	end
+	-- can a jump cross a gap this wide (edge to edge) to a landing dy higher or lower? One rule for the planner, the driver and the jump itself.
+	function Terrain.canGap(wide, dy, c)
+		c = c or Terrain.caps()
+		local raw = Terrain.reachRaw(dy, c)
+		return raw ~= nil and wide + 1.2 <= raw * 0.88
+	end
 	-- it jumped (or tried): remember what worked, so the next time it knows how high and how far it can really go
 	function Terrain.note(kind, size, ok)
 		local m = movesRec()
@@ -10602,7 +10787,7 @@ end)()
 	function Terrain.bodyText()
 		local c = Terrain.caps()
 		local m = movesRec()
-		local bits = { ("can jump up about %.1f studs and across about %.0f studs"):format(c.Hsafe, math.max(0, (Terrain.reachRaw(0, c) or 0) * 0.85 - 1.5)) }
+		local bits = { ("can jump up about %.1f studs and across about %.0f studs"):format(c.Hsafe, math.max(0, (Terrain.reachRaw(0, c) or 0) * 0.88 - 1.2)) }
 		if tonumber(m.upFail) then
 			bits[#bits + 1] = ("failed to jump up %.1f studs"):format(m.upFail)
 		end
@@ -10655,18 +10840,26 @@ end)()
 					local za = Body.hazardOf(a)
 					if ay - feet > 4.2 then
 						-- something tall: is it a roof with walkable ground under it, or a solid block?
-						local rp2 = rparams({ a.Instance })
-						local b = ray(Vector3.new(x, feet + 70, z), Vector3.new(0, -240, 0), rp2)
-						G.rays = G.rays + 1
 						G.h[idx * 2 + 1], G.z[idx * 2 + 1] = ay, za
 						if isTruss(a.Instance) then
 							G.climb[idx * 2 + 1] = true
 						end
-						if b and b.Instance then
-							local under = undersideY(a.Instance)
+						-- what is under it that a body can stand on? A roof over a doorway has a lintel under it, so look through up to three layers
+						local skip, cur = { a.Instance }, a
+						for _ = 1, 3 do
+							local rp2 = rparams(skip)
+							local b = ray(Vector3.new(x, feet + 70, z), Vector3.new(0, -240, 0), rp2)
+							G.rays = G.rays + 1
+							if not (b and b.Instance) then
+								break
+							end
+							local under = undersideY(cur.Instance)
 							if under and under - b.Position.Y >= 5.5 then
 								G.h[idx * 2], G.z[idx * 2] = b.Position.Y, Body.hazardOf(b)
+								break
 							end
+							skip[#skip + 1] = b.Instance
+							cur = b
 						end
 					else
 						G.h[idx * 2], G.z[idx * 2] = ay, za
@@ -10817,15 +11010,16 @@ end)()
 		local c = o.caps or Terrain.caps()
 		local v = o.v or c.v
 		local S = G.S
-		local cost, prev, kind = { [start] = 0 }, {}, {}
+		local cost, prev, kind, via = { [start] = 0 }, {}, {}, {}
+		local portals = (o.portals ~= false and Brain.Sight and Brain.Sight.portalEdges) and Brain.Sight.portalEdges(G) or nil
 		local hp = {}
 		heapPush(hp, start, 0)
 		local done = {}
 		local goalPos = o.goal and posOf(G, o.goal) or nil
 		local jr = 1
-		local rmax = (Terrain.reachRaw(0, c) or 0) * 0.85
+		local rmax = (Terrain.reachRaw(0, c) or 0) * 0.88
 		if o.jump then
-			jr = math.max(1, math.floor((S + rmax - 1.5) / S))
+			jr = math.max(1, math.floor((S + rmax - 1.2) / S))
 		end
 		local now = os.clock()
 		local maxCost = o.maxCost or 1e9
@@ -10895,7 +11089,7 @@ end)()
 													end
 												elseif o.jump then
 													local raw = Terrain.reachRaw(dy, c)
-													if raw and (d - S) + 1.5 <= raw * 0.85 then
+													if raw and Terrain.canGap(d - S, dy, c) then
 														-- nothing tall may stand in the way of the jump
 														local clear = true
 														for _, tt in ipairs({ 0.34, 0.67 }) do
@@ -10935,7 +11129,7 @@ end)()
 												end
 												local nc = cn + d / v + extra
 												if nc < (cost[m] or 1e9) then
-													cost[m], prev[m], kind[m] = nc, n, step
+													cost[m], prev[m], kind[m], via[m] = nc, n, step, nil
 													local h = 0
 													if goalPos then
 														local mp = posOf(G, m)
@@ -10950,10 +11144,32 @@ end)()
 							end
 						end
 					end
+					-- doorways, windows and holes the eyes found: a way between two places that the cells cannot show
+					local pl = portals and portals[n]
+					if pl then
+						for _, e in ipairs(pl) do
+							local m = e.to
+							if not done[m] and (o.jump or not e.hop) then
+								local bad = BAD[edgeKey(n, m)]
+								if not (bad and bad > now) then
+									local pa, pb = posOf(G, n), posOf(G, m)
+									local nc = cn + math.max(flat(pa, pb), 2) / v + 0.5 + e.extra
+									if nc < (cost[m] or 1e9) then
+										cost[m], prev[m], kind[m], via[m] = nc, n, "portal", e
+										local h = 0
+										if goalPos then
+											h = flat(pb, goalPos) / v
+										end
+										heapPush(hp, m, nc + h)
+									end
+								end
+							end
+						end
+					end
 				end
 			end
 		end
-		return { cost = cost, prev = prev, kind = kind, start = start, G = G, expanded = expanded }
+		return { cost = cost, prev = prev, kind = kind, via = via, start = start, G = G, expanded = expanded }
 	end
 	-- the list of steps from the start to node n: { {pos, kind, node}... }
 	function Terrain.pathTo(res, n)
@@ -10963,7 +11179,7 @@ end)()
 		local G, list = res.G, {}
 		local k = n
 		while k do
-			list[#list + 1] = { node = k, pos = posOf(G, k), kind = res.kind[k] or "start" }
+			list[#list + 1] = { node = k, pos = posOf(G, k), kind = res.kind[k] or "start", via = res.via and res.via[k] or nil }
 			k = res.prev[k]
 		end
 		local out = { G = G }
@@ -10999,6 +11215,9 @@ end)()
 			jump = cfg.Parkour ~= false
 		end
 		local goal = nodeOf(G, dest.X, dest.Z, dest.Y and (dest.Y - 3) or feet)
+		if goal and dest.Y and math.abs((G.h[goal] or feet) - (dest.Y - 3)) > 9 then
+			goal = nil -- nothing to stand on at that height there (it is in the air): meet it on the nearest platform at its height
+		end
 		local res = Terrain.search(G, me, { jump = jump, goal = goal, hazOk = o.hazOk, threats = o.threats, caps = o.caps })
 		local target, exact = goal, goal ~= nil and res.cost[goal] ~= nil
 		if not exact then
@@ -11006,6 +11225,10 @@ end)()
 			for n, cst in pairs(res.cost) do
 				local p = posOf(G, n)
 				local d = flat(p, dest) + cst * 0.5
+				if dest.Y then
+					-- a point up in the air is best met on a platform at that height, not on the ground far below it
+					d = d + math.min(60, math.abs(p.Y - (dest.Y - 3))) * 1.2
+				end
 				if not bd or d < bd then
 					best, bd = n, d
 				end
@@ -11054,6 +11277,100 @@ end)()
 				return kz
 			end
 		end
+		-- the ground a step ahead, the way it walks (from a little above the feet)
+		local function floorAt(dd)
+			local p = base + fwd * dd
+			return ray(Vector3.new(p.X, feet + c.step + 2, p.Z), Vector3.new(0, -80, 0), rp)
+		end
+		-- what kind of trouble is the ground at this distance (nil = ordinary ground)
+		local function troubleAt(dd)
+			local fl = floorAt(dd)
+			if not (fl and fl.Instance) then
+				return "void", nil
+			end
+			local hz = Body.hazardOf(fl)
+			if hz and hz ~= "water" then
+				return "hazard", fl, hz
+			end
+			if fl.Position.Y < feet - 3 then
+				return "drop", fl
+			end
+			return nil, fl
+		end
+		-- a surface it could land on: higher than what is under the edge, within what a jump can reach, with room to stand
+		local function landingAt(dd, belowY)
+			local p = base + fwd * dd
+			local up = c.Hsafe + 0.4
+			local top = ray(Vector3.new(p.X, feet + up, p.Z), Vector3.new(0, -(up + c.drop + 2), 0), rp)
+			if not (top and top.Instance) then
+				return nil
+			end
+			local y = top.Position.Y
+			local hz = Body.hazardOf(top)
+			if hz and hz ~= "water" then
+				return nil
+			end
+			if y < feet - c.drop or y > feet + c.Hsafe + 0.05 then
+				return nil
+			end
+			if belowY and y < belowY + 2.5 then
+				return nil -- that is just the floor under the edge, not another platform
+			end
+			if ray(Vector3.new(p.X, y + 0.2, p.Z), Vector3.new(0, 4.6, 0), rp) then
+				return nil -- no room to stand
+			end
+			return y
+		end
+		-- the floor ahead, up to the wall or as far as asked: the first place it stops being ground is the edge, found to a few tenths of a stud
+		local limit = nearest and math.max(0, nearest - 0.25) or maxD
+		local prevD = 0
+		for k = 1, math.max(1, math.floor(limit)) do
+			local dd = k * 1.0
+			if dd > limit + 0.01 then
+				break
+			end
+			local what, fl, hz = troubleAt(dd)
+			if what then
+				local lo, hi = prevD, dd
+				for _ = 1, 4 do
+					local mid = (lo + hi) / 2
+					if troubleAt(mid) then
+						hi = mid
+					else
+						lo = mid
+					end
+				end
+				local edgeD = (lo + hi) / 2
+				local belowY = fl and fl.Position.Y or nil
+				-- is there something to land on beyond it?
+				local found, foundY
+				for dd2 = hi + 0.5, hi + 14, 1.0 do
+					local y = landingAt(dd2, belowY)
+					if y then
+						found, foundY = dd2, y
+						break
+					end
+				end
+				if found then
+					local a, b = found - 1.0, found
+					for _ = 1, 4 do
+						local mid = (a + b) / 2
+						if landingAt(mid, belowY) then
+							b = mid
+						else
+							a = mid
+						end
+					end
+					local landD = (a + b) / 2
+					return { kind = what == "hazard" and "hazard" or "gap", d = edgeD, land = landD, landY = foundY, wide = landD - edgeD, why = hz, depth = belowY and (feet - belowY) or nil }
+				end
+				if what == "hazard" then
+					return { kind = "hazard", d = edgeD, why = hz }
+				end
+				return { kind = "drop", d = edgeD, void = what == "void", depth = belowY and (feet - belowY) or nil }
+			end
+			prevD = dd
+		end
 		if nearest then
 			-- how high is the thing: find its top just behind the face
 			local probe = base + fwd * (nearest + 0.7)
@@ -11072,41 +11389,70 @@ end)()
 			end
 			return { kind = "wall", d = nearest, h = h }
 		end
-		-- no wall: the floor ahead (gaps, drops, hazards)
-		local lastGood = feet
-		for k = 1, math.max(1, math.floor(maxD / 1.5)) do
-			local dd = k * 1.5
-			local p = base + fwd * dd
-			local fl = ray(Vector3.new(p.X, feet + c.step + 2, p.Z), Vector3.new(0, -60, 0), rp)
-			if not fl or not fl.Instance then
-				-- a hole: where is the far side?
-				for k2 = k + 1, k + 8 do
-					local p2 = base + fwd * (k2 * 1.5)
-					local fl2 = ray(Vector3.new(p2.X, feet + c.step + 2, p2.Z), Vector3.new(0, -60, 0), rp)
-					if fl2 and fl2.Instance and not Body.hazardOf(fl2) then
-						return { kind = "gap", d = dd - 0.75, land = k2 * 1.5, landY = fl2.Position.Y, wide = (k2 - k) * 1.5 }
-					end
-				end
-				return { kind = "drop", d = dd, void = true }
-			end
-			local hz = Body.hazardOf(fl)
-			if hz and hz ~= "water" then
-				-- a strip of something deadly: how wide? is there floor beyond?
-				for k2 = k + 1, k + 8 do
-					local p2 = base + fwd * (k2 * 1.5)
-					local fl2 = ray(Vector3.new(p2.X, feet + c.step + 2, p2.Z), Vector3.new(0, -60, 0), rp)
-					if fl2 and fl2.Instance and not Body.hazardOf(fl2) then
-						return { kind = "hazard", d = dd - 0.75, land = k2 * 1.5, landY = fl2.Position.Y, wide = (k2 - k) * 1.5, why = hz }
-					end
-				end
-				return { kind = "hazard", d = dd, why = hz }
-			end
-			if fl.Position.Y < feet - 3 then
-				return { kind = "drop", d = dd, depth = feet - fl.Position.Y }
-			end
-			lastGood = fl.Position.Y
-		end
 		return { kind = "clear", d = 99 }
+	end
+
+	-- how far it is to the edge of what it stands on, in 8 directions, to a tenth of a stud.
+	-- { dirs = { { dir, d (nil = no edge that way within maxD), wall (a wall comes first), drop (how deep it is below the edge), void }... }, nearest = the closest edge }
+	function Terrain.edges(maxD)
+		local _, root, hum = parts()
+		if not root then
+			return nil
+		end
+		maxD = maxD or 10
+		local c = Terrain.caps()
+		local rp = rparams()
+		local feet = feetOf(root, hum)
+		local base = Vector3.new(root.Position.X, feet, root.Position.Z)
+		local out = { dirs = {}, feet = feet }
+		local function bad(dir, dd)
+			local p = base + dir * dd
+			local fl = ray(Vector3.new(p.X, feet + c.step + 2, p.Z), Vector3.new(0, -90, 0), rp)
+			if not (fl and fl.Instance) then
+				return true, nil
+			end
+			return fl.Position.Y < feet - 2.0, fl
+		end
+		for i = 0, 7 do
+			local ang = i * math.pi / 4
+			local dir = Vector3.new(math.cos(ang), 0, math.sin(ang))
+			local rec = { dir = dir }
+			local wall = ray(base + Vector3.new(0, 1.2, 0), dir * maxD, rp)
+			local limit = maxD
+			if wall and wall.Instance then
+				rec.wall = (wall.Position - (base + Vector3.new(0, 1.2, 0))).Magnitude
+				limit = math.max(0, rec.wall - 0.3)
+			end
+			local prev = 0
+			for k = 1, math.max(1, math.floor(limit / 0.5)) do
+				local dd = k * 0.5
+				if dd > limit + 0.01 then
+					break
+				end
+				local isBad, fl = bad(dir, dd)
+				if isBad then
+					local lo, hi = prev, dd
+					for _ = 1, 4 do
+						local mid = (lo + hi) / 2
+						if (bad(dir, mid)) then
+							hi = mid
+						else
+							lo = mid
+						end
+					end
+					rec.d = (lo + hi) / 2
+					rec.void = fl == nil
+					rec.drop = fl and (feet - fl.Position.Y) or 99
+					break
+				end
+				prev = dd
+			end
+			out.dirs[#out.dirs + 1] = rec
+			if rec.d and (not out.nearest or rec.d < out.nearest.d) then
+				out.nearest = rec
+			end
+		end
+		return out
 	end
 
 	local function grounded(hum)
@@ -11126,21 +11472,27 @@ end)()
 	function Terrain.drive(hum, root, pos, o)
 		o = o or {}
 		local d = flat(root.Position, pos)
-		if d < (o.within or 1.5) then
-			return "arrived"
+		if d < (o.within or 1.5) and math.abs(root.Position.Y - pos.Y) < 9 then
+			return "arrived" -- standing under a platform it wanted to be on is not there
 		end
 		local c = Terrain.caps()
 		local fwd = Vector3.new(pos.X - root.Position.X, 0, pos.Z - root.Position.Z)
-		local info = Terrain.ahead(fwd, math.min(9, d + 1))
 		local now = os.clock()
+		if not grounded(hum) then
+			-- in the air there is nothing to decide: keep going toward the landing (a stop in mid-air is what drops it short of the platform)
+			local aim = (Terrain.air and now < Terrain.air.untilT) and Terrain.air.aim or (pos + Vector3.new(fwd.X, 0, fwd.Z).Unit * 3)
+			Legs.moveTo(hum, aim)
+			return "moving", { kind = "air", d = 0 }
+		end
+		local info = Terrain.ahead(fwd, math.min(9, d + 1))
 		local dt = o.dt or 0.1
-		local near = c.v * dt * 0.6
+		local near = c.v * dt * 0.5 + 0.2
 		local stopD = c.v * dt + 1.0 -- it keeps moving between two looks, so it has to stop this far before an edge
 		local can = grounded(hum) and now - lastJump > 0.45
 		local result = "moving"
 		if info.kind == "ledge" then
 			if can and info.d <= Terrain.launchDist(info.h, c) + near then
-				if Legs.jump(hum) then
+				if Legs.jump(hum, true) then
 					lastJump = now
 					Body.stats.jumps = Body.stats.jumps + 1
 					Terrain.pending = { kind = "up", size = info.h, at = now, pos = root.Position, top = info.top }
@@ -11148,14 +11500,33 @@ end)()
 			end
 		elseif info.kind == "gap" or (info.kind == "hazard" and info.land) then
 			local wide = info.wide or 0
-			local raw = Terrain.reachRaw((info.landY or 0) - Terrain.feetOf(root, hum), c)
 			local dy = (info.landY or 0) - Terrain.feetOf(root, hum)
-			if cfg.Parkour ~= false and raw and wide + 1.5 <= raw * 0.85 and dy >= -c.drop then
-				if can and info.d <= 0.5 + near then
-					if Legs.jump(hum) then
+			if cfg.Parkour ~= false and Terrain.canGap(wide, dy, c) and dy >= -c.drop then
+				if can and info.d <= c.v * dt + 1.2 then
+					-- the edge is closer than one step of the caller's loop: look every 0.03 s from here, still running, and take off at the very edge
+					local u0 = Vector3.new(fwd.X, 0, fwd.Z).Unit
+					local t0 = os.clock()
+					while Alive and os.clock() - t0 < 1.2 and info.d > c.v * 0.04 + 0.25 do
+						Legs.moveTo(hum, root.Position + u0 * 12)
+						task.wait(0.03)
+						if not grounded(hum) then
+							return "moving", { kind = "air", d = 0 }
+						end
+						info = Terrain.ahead(u0, 9)
+						if info.kind ~= "gap" and not (info.kind == "hazard" and info.land) then
+							return "moving", info
+						end
+					end
+					wide = info.wide or wide
+					dy = (info.landY or 0) - Terrain.feetOf(root, hum)
+				end
+				if can and info.d <= c.v * 0.04 + 0.25 + 0.05 and Terrain.canGap(wide, dy, c) then
+					if Legs.jump(hum, true) then
 						lastJump = now
 						Body.stats.jumps = Body.stats.jumps + 1
 						Terrain.pending = { kind = "gap", size = wide, at = now, pos = root.Position }
+						local u = Vector3.new(fwd.X, 0, fwd.Z).Unit
+						Terrain.air = { aim = root.Position + u * ((info.land or 4) + 2.5) + Vector3.new(0, dy, 0), untilT = now + 1.8 }
 					end
 				end
 			elseif info.d < stopD then
@@ -11219,26 +11590,22 @@ end)()
 			return false
 		end
 		local pa, pb = posOf(G, a), posOf(G, b)
-		local u = Vector3.new(pb.X - root.Position.X, 0, pb.Z - root.Position.Z)
-		if u.Magnitude < 0.5 then
+		if flat(root.Position, pb) < 0.5 then
 			return true
 		end
-		u = u.Unit
 		local c = Terrain.caps()
-		local dy = pb.Y - pa.Y
-		-- run up to the place to take off: right at the edge for a gap, a launch distance from the face for a ledge
-		local launchAt
-		local info = Terrain.ahead(u, 14)
-		local wideSeen = (info.kind == "gap" or info.kind == "hazard") and info.wide or nil
-		if dy > c.step then
-			local face = info.kind == "ledge" and info.d or math.max(1, flat(root.Position, pb) - G.S * 0.5 - 1)
-			launchAt = root.Position + u * math.max(0, face - Terrain.launchDist(dy, c))
-		else
-			local edge = (info.kind == "gap" or info.kind == "hazard" or info.kind == "drop") and info.d or math.max(0, flat(root.Position, pa) + G.S * 0.5 - 0.7)
-			launchAt = root.Position + u * math.max(0, edge - 0.6)
+		local dyNode = pb.Y - pa.Y
+		local function aimDir()
+			local _, r = parts()
+			local v = Vector3.new(pb.X - r.Position.X, 0, pb.Z - r.Position.Z)
+			return v.Magnitude > 0.05 and v.Unit or Vector3.new(1, 0, 0)
 		end
+		-- RUN UP: keep going at full speed, look at the floor every 0.03 s, and take off at the very edge (a gap) or at the launch distance from the face (a ledge).
+		-- It never slows down or stops to think: the speed is what carries it across.
 		local t0 = os.clock()
-		while Alive and (not tok or tok == Body.token) and os.clock() - t0 < 4 do
+		local cur, u
+		local fired = false
+		while Alive and (not tok or tok == Body.token) and os.clock() - t0 < 5 do
 			if not Legs.can() then
 				return false
 			end
@@ -11246,29 +11613,63 @@ end)()
 			if not (root and hum) then
 				return false
 			end
-			local dl = flat(root.Position, launchAt)
-			if dl < 0.9 or (dl < 1.6 and flat(root.Position, pb) < flat(launchAt, pb) + 0.3) then
-				break
+			u = aimDir()
+			cur = Terrain.ahead(u, 9)
+			local trigger = c.v * 0.04 + 0.25
+			if cur.kind == "gap" or cur.kind == "hazard" or (cur.kind == "drop" and dyNode < -c.step) then
+				if cur.d <= trigger then
+					fired = true
+					break
+				end
+			elseif cur.kind == "ledge" then
+				if cur.d <= Terrain.launchDist(cur.h, c) + 0.15 then
+					fired = true
+					break
+				end
+			elseif cur.kind == "step" or cur.kind == "clear" then
+				if flat(root.Position, pb) < 1.6 then
+					return true -- nothing needed a jump after all, and it is there
+				end
+			elseif cur.kind == "wall" and cur.d < 1.2 then
+				return false -- a wall, not a ledge it can jump
 			end
-			Legs.moveTo(hum, launchAt + u * 0.5)
-			task.wait(0.05)
+			Legs.moveTo(hum, root.Position + u * 12)
+			task.wait(0.03)
 		end
-		-- jump and steer through the air
+		if not fired then
+			return false
+		end
+		-- JUMP, and keep running in the air toward the far side
 		char, root, hum = parts()
 		if not (root and hum) then
 			return false
 		end
-		local startFeet = feetOf(root, hum)
 		local from = root.Position
-		if not Legs.jump(hum) then
+		local startFeet = feetOf(root, hum)
+		local kind = cur.kind
+		if (kind == "gap" or kind == "hazard") and cur.wide and cur.landY then
+			local dyL = cur.landY - startFeet
+			if not Terrain.canGap(cur.wide, dyL, c) then
+				-- measured at the edge, to the tenth of a stud: this one cannot be crossed, so it does not try
+				Terrain.badEdge(a, b)
+				return false
+			end
+		end
+		local landDist = (kind == "ledge") and (cur.d + 1.0) or (cur.land or (cur.d + 4))
+		local expectY = (kind == "ledge") and cur.top or ((kind == "gap" or kind == "hazard") and cur.landY) or pb.Y
+		local wide = (kind == "gap" or kind == "hazard") and cur.wide or nil
+		local dy = (expectY or pb.Y) - startFeet
+		if not Legs.jump(hum, true) then
 			return false
 		end
 		Body.stats.jumps = Body.stats.jumps + 1
-		local land = pb + u * 1.2
+		local land = from + u * (landDist + 2.0)
+		land = Vector3.new(land.X, from.Y, land.Z)
+		Terrain.air = { aim = land, untilT = os.clock() + 2.2 }
 		local t1 = os.clock()
 		local airborne, stable = false, 0
-		while Alive and (not tok or tok == Body.token) and os.clock() - t1 < 2.2 do
-			task.wait(0.04)
+		while Alive and (not tok or tok == Body.token) and os.clock() - t1 < 2.4 do
+			task.wait(0.03)
 			char, root, hum = parts()
 			if not (root and hum) then
 				return false
@@ -11288,21 +11689,51 @@ end)()
 				end
 			end
 		end
+		Terrain.air = nil
 		char, root, hum = parts()
 		if not (root and hum) then
 			return false
 		end
 		local feet = feetOf(root, hum)
-		local ok = flat(root.Position, pb) <= G.S * 1.1 and math.abs(feet - pb.Y) <= 2.2
-		local size = dy > c.step and dy or math.max(0, flat(from, pb) - G.S)
-		if dy <= c.step and wideSeen then
-			size = math.max(size, wideSeen)
-		end
-		Terrain.note(dy > c.step and "up" or "gap", size, ok)
+		local progress = (root.Position - from):Dot(u)
+		local ok = math.abs(feet - (expectY or pb.Y)) <= 2.2 and progress >= landDist - 0.5 and hum.Health > 0
+		local size = (dy > c.step and not wide) and dy or (wide or math.max(0, flat(from, pb) - G.S))
+		Terrain.note((dy > c.step and not wide) and "up" or "gap", size, ok)
 		if not ok then
 			Terrain.badEdge(a, b)
 		end
 		return ok
+	end
+
+
+	-- a cell is 4 studs wide but a doorway, a corridor or a plank is not: aim for the middle of the free space at a place on the route,
+	-- and keep clear of walls, so it goes through the door and not into the frame beside it
+	function Terrain.centered(pos, from)
+		local char, root, hum = parts()
+		if not root then
+			return pos
+		end
+		local dir = Vector3.new(pos.X - from.X, 0, pos.Z - from.Z)
+		if dir.Magnitude < 0.5 then
+			return pos
+		end
+		dir = dir.Unit
+		local side = Vector3.new(-dir.Z, 0, dir.X)
+		local rp = rparams()
+		local o = Vector3.new(pos.X, root.Position.Y, pos.Z)
+		local function free(sgn)
+			local hit = ray(o, side * sgn * 4, rp)
+			return hit and (hit.Position - o).Magnitude or 4
+		end
+		local plus, minus = free(1), free(-1)
+		if math.min(plus, minus) >= 3 then
+			return pos
+		end
+		local off = math.clamp((plus - minus) / 2, -2.5, 2.5)
+		if math.abs(off) < 0.3 then
+			return pos
+		end
+		return pos + side * off
 	end
 
 	-- walk a route (from Terrain.route): walks cell to cell and does the planned jumps. result: arrived, interrupted, stuck, legsoff, timeout, off
@@ -11333,6 +11764,7 @@ end)()
 			end
 		end
 		local stuckT, lastPos = 0, nil
+		local tick = 0.1
 		while Alive and i <= #path do
 			if tok and tok ~= Body.token then
 				return "interrupted"
@@ -11362,7 +11794,17 @@ end)()
 				return "interrupted"
 			end
 			local step = path[i]
-			if step.kind == "jump" or step.kind == "gap" then
+			if step.kind == "portal" and step.via and Brain.Sight then
+				-- through a doorway, a window or a hole: lined up in front, straight through, no stopping in the frame
+				Body.now = "going through a " .. (step.via.o.kind == "door" and "doorway" or step.via.o.kind)
+				local ok = Brain.Sight.cross(step.via.o, step.via.mode, tok)
+				if not ok then
+					Terrain.badEdge(path[i - 1].node, step.node)
+					return "stuck"
+				end
+				i = i + 1
+				stuckT = 0
+			elseif step.kind == "jump" or step.kind == "gap" then
 				local ok = Terrain.jumpEdge(G, path[i - 1].node, step.node, tok, o)
 				if not ok then
 					return "stuck"
@@ -11372,16 +11814,22 @@ end)()
 			else
 				local nxt = path[i + 1]
 				local lead = (nxt and nxt.kind ~= "jump" and nxt.kind ~= "gap") and 3 or ((not nxt and o.through) and 4 or 0)
-				local res = Terrain.drive(hum, root, Vector3.new(step.pos.X, root.Position.Y, step.pos.Z), { within = 1.8, dt = 0.1, lead = lead })
+				if not step.aim then
+					local prev = path[i - 1] and path[i - 1].pos or root.Position
+					step.aim = (step.kind == "walk" or step.kind == nil) and Terrain.centered(step.pos, prev) or step.pos
+				end
+				local res, dinfo = Terrain.drive(hum, root, Vector3.new(step.aim.X, root.Position.Y, step.aim.Z), { within = 1.8, dt = tick, lead = lead })
 				Terrain.judge(root, hum)
+				-- close to an edge or a ledge (or in the air) it looks every 0.04 s, so the take-off is at the edge and not a stride before it
+				tick = (dinfo and (dinfo.kind == "gap" or dinfo.kind == "hazard" or dinfo.kind == "ledge" or dinfo.kind == "air" or dinfo.kind == "drop") and (dinfo.d or 0) < 6) and 0.04 or 0.1
 				if res == "arrived" then
 					i = i + 1
 					stuckT = 0
 				else
 					local moved = lastPos and flat(root.Position, lastPos) or 9
 					lastPos = root.Position
-					if moved < 0.25 then
-						stuckT = stuckT + 0.1
+					if moved < 0.25 * (tick / 0.1) then
+						stuckT = stuckT + tick
 					else
 						stuckT = 0
 					end
@@ -11390,7 +11838,7 @@ end)()
 						return "stuck"
 					end
 				end
-				task.wait(0.1)
+				task.wait(tick)
 			end
 		end
 		return "arrived"
@@ -11436,6 +11884,1343 @@ end)()
 	track(lp.CharacterAdded:Connect(function()
 		Terrain.reset()
 	end))
+end)()
+------------------------------------------------------------------ sight: the 3D eyes. Every box around it (floors, walls, roofs, pillars, furniture, loose things) with its real size and tilt,
+-- the buildings they make, and the OPENINGS in them: doorways, windows, holes in floors and roofs. It also draws what it sees when asked ("how I see" overlay).
+;(function()
+	local Sight = {}
+	Brain.Sight = Sight
+	local Games = Brain.Games
+	local Body = Brain.Body
+	local Legs = Core.Legs
+
+	local RADIUS = 70
+	local MAXPARTS = 1400
+	local MAXBOXES = 700
+	local WALK_W = 2.3 -- how wide a gap must be for the body to go through
+	local WALK_H = 4.7 -- how tall, when it walks through standing up
+	local HOP_H = 5.4 -- how tall, when it has to jump up to the sill (the head is high when it passes the frame)
+
+	Sight.boxes, Sight.structs, Sight.openings, Sight.planes = {}, {}, {}, {}
+	Sight.stats = { looks = 0, boxes = 0, rays = 0, openings = 0, crossed = 0, failed = 0 }
+	Sight.at, Sight.center = -1e9, nil
+	local planeCache = {} -- plane key -> { openings, at }
+	local BAD = {} -- opening key -> until
+
+	local function parts()
+		local c = lp.Character
+		return c, c and c:FindFirstChild("HumanoidRootPart"), c and c:FindFirstChildOfClass("Humanoid")
+	end
+	local function flat(a, b)
+		return math.sqrt((a.X - b.X) ^ 2 + (a.Z - b.Z) ^ 2)
+	end
+	local function rparams()
+		local rp = RaycastParams.new()
+		rp.FilterType = Enum.RaycastFilterType.Exclude
+		rp.FilterDescendantsInstances = { lp.Character }
+		pcall(function()
+			rp.RespectCanCollide = true
+		end)
+		return rp
+	end
+	local function ray(from, dir, rp)
+		Sight.stats.rays = Sight.stats.rays + 1
+		local ok, hit = pcall(function()
+			return workspace:Raycast(from, dir, rp)
+		end)
+		return ok and hit or nil
+	end
+	local function on()
+		return cfg.Openings ~= false
+	end
+	local function T()
+		return Brain.Terrain
+	end
+	local function movesRec()
+		local g = Games.cur()
+		if not g then
+			Sight._m = Sight._m or {}
+			return Sight._m
+		end
+		if type(g.know.moves) ~= "table" then
+			g.know.moves = {}
+		end
+		return g.know.moves
+	end
+	-- what a body needs (learned: a gap it failed to get through is a little too small next time)
+	local function needs()
+		local m = movesRec()
+		local extra = math.clamp(tonumber(m.holeFail) or 0, 0, 1.5)
+		return WALK_W + extra * 0.5, WALK_H + extra, HOP_H + extra
+	end
+
+	------------------------------------------------------------ the boxes
+	local function words(name)
+		local ok, set = pcall(Games.tokenize, name)
+		return ok and set or {}
+	end
+	local GLASS = { window = true, glass = true, pane = true, windshield = true }
+	local DOORS = { door = true, gate = true, doorway = true, hatch = true, portal = true }
+	local STAIRS = { stair = true, stairs = true, step = true, steps = true, ramp = true }
+
+	-- oriented box facts of a part: axes, size, the box that surrounds it (min/max), and what it is for
+	local function entryOf(p, rootFeet)
+		local ok, e = pcall(function()
+			if not p:IsA("BasePart") then
+				return nil
+			end
+			local size, pos = p.Size, p.Position
+			local cf = p.CFrame
+			local r, u, l = cf.RightVector or Vector3.new(1, 0, 0), cf.UpVector or Vector3.new(0, 1, 0), cf.LookVector or Vector3.new(0, 0, -1)
+			local axes = { r, u, l }
+			local hx, hy, hz = size.X / 2, size.Y / 2, size.Z / 2
+			local ex = math.abs(r.X) * hx + math.abs(u.X) * hy + math.abs(l.X) * hz
+			local ey = math.abs(r.Y) * hx + math.abs(u.Y) * hy + math.abs(l.Y) * hz
+			local ez = math.abs(r.Z) * hx + math.abs(u.Z) * hy + math.abs(l.Z) * hz
+			local lo, hi = Vector3.new(pos.X - ex, pos.Y - ey, pos.Z - ez), Vector3.new(pos.X + ex, pos.Y + ey, pos.Z + ez)
+			local sv = { size.X, size.Y, size.Z }
+			local vi, vv = 2, -1
+			for i = 1, 3 do
+				local v = math.abs(axes[i].Y)
+				if v > vv then
+					vi, vv = i, v
+				end
+			end
+			local height = sv[vi]
+			local h1, h2
+			for i = 1, 3 do
+				if i ~= vi then
+					if not h1 then
+						h1 = sv[i]
+					else
+						h2 = sv[i]
+					end
+				end
+			end
+			local thin, long = math.min(h1, h2), math.max(h1, h2)
+			local solid = p.CanCollide == true
+			local trans = tonumber(p.Transparency) or 0
+			local e = { part = p, name = p.Name, cf = cf, axes = axes, size = size, min = lo, max = hi, center = pos, vi = vi, height = height, thin = thin, long = long, solid = solid, trans = trans, loose = not p.Anchored, tilt = vv }
+			local nm = words(p.Name)
+			e.words = nm
+			local role
+			local haz = Body.hazardOf and Body.hazardOf({ Instance = p, Position = pos, Material = p.Material }) or nil
+			if p:IsA("TrussPart") then
+				role = "ladder"
+			elseif haz and haz ~= "water" then
+				role = "hazard"
+			elseif not solid then
+				role = "ghost"
+			elseif vv < 0.93 and vv > 0.3 and height <= 3.5 then
+				role = "ramp"
+			elseif (trans >= 0.3 and thin <= 3.3) or nm.glass or nm.window then
+				role = "glass"
+			elseif long > 150 then
+				role = "ground"
+			elseif height < thin and (height <= 2.1 or long >= 8) and height <= 3.2 and long >= 3.5 then
+				role = "floor" -- a slab: its smallest side is the vertical one
+			elseif height >= thin and thin <= 3.3 and height >= 1.5 and long >= 3 then
+				role = "wall" -- a wall, or a piece of one (under a window, over a door)
+			elseif long <= 6.5 and height >= 8 then
+				role = "pillar"
+			elseif height <= 7.5 and long <= 9 then
+				role = "prop"
+			else
+				role = "block"
+			end
+			e.role = role
+			if nm.door or nm.gate then
+				e.door = true
+			end
+			local okv, vel = pcall(function()
+				return p.AssemblyLinearVelocity
+			end)
+			e.moving = okv and vel and vel.Magnitude > 1.5 or false
+			return e
+		end)
+		return ok and e or nil
+	end
+
+	local function nearPlayer(center, radius)
+		local params = OverlapParams.new()
+		params.FilterType = Enum.RaycastFilterType.Exclude
+		params.FilterDescendantsInstances = { lp.Character }
+		pcall(function()
+			params.MaxParts = MAXPARTS
+		end)
+		local ok, list = pcall(function()
+			return workspace:GetPartBoundsInRadius(center, radius, params)
+		end)
+		if ok and type(list) == "table" then
+			return list
+		end
+		-- no spatial query on this device: look through the world, but not forever
+		local out, n = {}, 0
+		for _, d in ipairs(workspace:GetDescendants()) do
+			n = n + 1
+			if n > 9000 then
+				break
+			end
+			if d:IsA("BasePart") then
+				local okd, dd = pcall(function()
+					return (d.Position - center).Magnitude
+				end)
+				if okd and dd <= radius + 20 then
+					out[#out + 1] = d
+				end
+			end
+		end
+		return out
+	end
+
+	local function isCreature(p)
+		local m = p:FindFirstAncestorOfClass("Model")
+		return m ~= nil and m:FindFirstChildOfClass("Humanoid") ~= nil
+	end
+
+	-- look at everything within reach and write it down. Cheap enough to call often: it does nothing when the last look is fresh.
+	function Sight.look(force)
+		local _, root = parts()
+		if not root then
+			return Sight.boxes
+		end
+		local now = os.clock()
+		if not force and Sight.center and now - Sight.at < 2.5 and flat(root.Position, Sight.center) < 12 then
+			return Sight.boxes
+		end
+		Sight.at, Sight.center = now, root.Position
+		Sight.stats.looks = Sight.stats.looks + 1
+		local list = nearPlayer(root.Position, RADIUS)
+		local boxes = {}
+		local old = Sight.byPart or {}
+		local byPart = setmetatable({}, { __mode = "k" })
+		for _, p in ipairs(list) do
+			if #boxes >= MAXBOXES then
+				break
+			end
+			if not World.isOwn(p) and not isCreature(p) and p.Name ~= "Terrain" then
+				local e = entryOf(p)
+				if e and not (e.role == "ghost" and e.trans >= 0.95) then
+					boxes[#boxes + 1] = e
+					byPart[p] = e
+				end
+			end
+		end
+		table.sort(boxes, function(a, b)
+			return flat(a.center, root.Position) < flat(b.center, root.Position)
+		end)
+		Sight.boxes, Sight.byPart = boxes, byPart
+		Sight.stats.boxes = #boxes
+		Sight.structures()
+		return boxes
+	end
+
+	------------------------------------------------------------ buildings: boxes that touch make one thing
+	function Sight.structures()
+		local solids = {}
+		for _, e in ipairs(Sight.boxes) do
+			if e.solid and not e.loose and e.role ~= "ghost" and e.role ~= "ground" and e.role ~= "hazard" then
+				solids[#solids + 1] = e
+			end
+		end
+		table.sort(solids, function(a, b)
+			return a.min.X < b.min.X
+		end)
+		local parent = {}
+		local function find(i)
+			while parent[i] ~= i do
+				parent[i] = parent[parent[i]]
+				i = parent[i]
+			end
+			return i
+		end
+		for i = 1, #solids do
+			parent[i] = i
+		end
+		local pad = 0.7
+		for i = 1, #solids do
+			local a = solids[i]
+			for j = i + 1, #solids do
+				local b = solids[j]
+				if b.min.X > a.max.X + pad then
+					-- sorted by min.X: nothing further right touches a (a's right edge is the limit only for this a, so keep scanning only while it can)
+					break
+				end
+				if b.min.Z <= a.max.Z + pad and a.min.Z <= b.max.Z + pad and b.min.Y <= a.max.Y + pad and a.min.Y <= b.max.Y + pad then
+					parent[find(j)] = find(i)
+				end
+			end
+		end
+		local groups = {}
+		for i, e in ipairs(solids) do
+			local r = find(i)
+			groups[r] = groups[r] or {}
+			table.insert(groups[r], e)
+		end
+		local _, root = parts()
+		local out = {}
+		for _, list in pairs(groups) do
+			local lo = Vector3.new(1e9, 1e9, 1e9)
+			local hi = Vector3.new(-1e9, -1e9, -1e9)
+			local cnt = { floor = 0, wall = 0, pillar = 0, prop = 0, block = 0, glass = 0, ramp = 0, ladder = 0 }
+			local model, same = nil, true
+			for _, e in ipairs(list) do
+				lo = Vector3.new(math.min(lo.X, e.min.X), math.min(lo.Y, e.min.Y), math.min(lo.Z, e.min.Z))
+				hi = Vector3.new(math.max(hi.X, e.max.X), math.max(hi.Y, e.max.Y), math.max(hi.Z, e.max.Z))
+				cnt[e.role] = (cnt[e.role] or 0) + 1
+				local m = e.part:FindFirstAncestorOfClass("Model")
+				if m then
+					if model == nil then
+						model = m
+					elseif model ~= m then
+						same = false
+					end
+				else
+					same = false
+				end
+			end
+			local s = { list = list, min = lo, max = hi, size = hi - lo, center = (lo + hi) / 2, n = cnt, name = (model and same) and model.Name or nil }
+			-- a floor above the tops of the walls is a roof
+			local topWall = -1e9
+			for _, e in ipairs(list) do
+				if e.role == "wall" then
+					topWall = math.max(topWall, e.max.Y)
+				end
+			end
+			local roofs = 0
+			if cnt.wall >= 2 then
+				for _, e in ipairs(list) do
+					if e.role == "floor" and e.min.Y >= topWall - 1.4 then
+						e.role = "roof"
+						roofs = roofs + 1
+					end
+				end
+			end
+			s.roofs = roofs
+			if cnt.wall >= 3 and (roofs > 0 or cnt.floor > 0 or cnt.wall >= 4) then
+				s.kind = "building"
+			elseif cnt.wall >= 1 then
+				s.kind = "walls"
+			elseif cnt.floor + cnt.block > 0 and cnt.pillar == 0 then
+				s.kind = "platform"
+			elseif cnt.pillar > 0 then
+				s.kind = "pillars"
+			else
+				s.kind = "things"
+			end
+			s.dist = root and flat(s.center, root.Position) or 0
+			out[#out + 1] = s
+		end
+		table.sort(out, function(a, b)
+			return a.dist < b.dist
+		end)
+		Sight.structs = out
+		return out
+	end
+
+	------------------------------------------------------------ openings in walls: look through every wall like a net of rays and see what is not there
+	local function canon(n)
+		if n.X < -0.01 or (math.abs(n.X) <= 0.01 and n.Z < 0) then
+			return -n
+		end
+		return n
+	end
+	-- walls on the same line (even with a gap between them, that is where a door is) make one plane
+	local function wallPlanes(boxes)
+		local W = {}
+		for _, e in ipairs(boxes) do
+			if e.solid and not e.loose and (e.role == "wall" or (e.role == "glass" and e.height >= 4)) then
+				local ti, tv = nil, 1e9
+				local sv = { e.size.X, e.size.Y, e.size.Z }
+				for i = 1, 3 do
+					if i ~= e.vi and sv[i] < tv then
+						ti, tv = i, sv[i]
+					end
+				end
+				local nh = Vector3.new(e.axes[ti].X, 0, e.axes[ti].Z)
+				if nh.Magnitude > 0.5 then
+					local n = canon(nh.Unit)
+					local t = Vector3.new(-n.Z, 0, n.X)
+					local hu = 0
+					for i = 1, 3 do
+						hu = hu + math.abs(e.axes[i]:Dot(t)) * sv[i] / 2
+					end
+					local uc = e.center:Dot(t)
+					W[#W + 1] = { e = e, n = n, t = t, d = e.center:Dot(n), u0 = uc - hu, u1 = uc + hu, y0 = e.min.Y, y1 = e.max.Y, thick = tv }
+				end
+			end
+		end
+		local parent = {}
+		for i = 1, #W do
+			parent[i] = i
+		end
+		local function find(i)
+			while parent[i] ~= i do
+				parent[i] = parent[parent[i]]
+				i = parent[i]
+			end
+			return i
+		end
+		for i = 1, #W do
+			for j = i + 1, #W do
+				local a, b = W[i], W[j]
+				if a.n:Dot(b.n) > 0.98 and math.abs(a.d - b.d) <= 1.0 and math.min(a.y1, b.y1) - math.max(a.y0, b.y0) > -0.3 then
+					local gap = math.max(b.u0 - a.u1, a.u0 - b.u1)
+					if gap <= 9 then
+						parent[find(j)] = find(i)
+					end
+				end
+			end
+		end
+		local groups = {}
+		for i, w in ipairs(W) do
+			local r = find(i)
+			groups[r] = groups[r] or {}
+			table.insert(groups[r], w)
+		end
+		local planes = {}
+		for _, g in pairs(groups) do
+			local P = { n = g[1].n, t = g[1].t, u0 = 1e9, u1 = -1e9, y0 = 1e9, y1 = -1e9, thick = 0, d = 0, members = #g }
+			for _, w in ipairs(g) do
+				P.u0, P.u1 = math.min(P.u0, w.u0), math.max(P.u1, w.u1)
+				P.y0, P.y1 = math.min(P.y0, w.y0), math.max(P.y1, w.y1)
+				P.thick = math.max(P.thick, w.thick)
+				P.d = P.d + w.d
+			end
+			P.d = P.d / #g
+			P.len, P.height = P.u1 - P.u0, P.y1 - P.y0
+			P.key = string.format("w%.1f:%.1f:%.1f:%.1f:%.1f:%.1f:%.1f:%d", P.n.X, P.n.Z, P.d, P.u0, P.u1, P.y0, P.y1, #g)
+			if P.len >= 2.6 and P.height >= 3.5 then
+				planes[#planes + 1] = P
+			end
+		end
+		return planes
+	end
+
+	local function floorAt(x, y, z, rp)
+		local hit = ray(Vector3.new(x, y, z), Vector3.new(0, -60, 0), rp)
+		return hit and hit.Instance and hit.Position.Y or nil
+	end
+
+	-- one wall plane -> its openings
+	local function planeOpenings(P, rp, budget)
+		local su, sy = math.max(1, P.len / 48), math.max(1, P.height / 24)
+		local nu, ny = math.max(1, math.ceil(P.len / su)), math.max(1, math.ceil(P.height / sy))
+		local base = P.n * P.d
+		local open = {}
+		local solidCells = 0
+		for iu = 0, nu - 1 do
+			open[iu] = {}
+			for iy = 0, ny - 1 do
+				local u = P.u0 + (iu + 0.5) * su
+				local y = P.y0 + (iy + 0.5) * sy
+				local pt = Vector3.new(base.X + P.t.X * u, y, base.Z + P.t.Z * u)
+				local o = pt + P.n * (P.thick / 2 + 0.9)
+				local hit = ray(o, -P.n * (P.thick + 1.8), rp)
+				budget.n = budget.n - 1
+				if hit and hit.Instance then
+					open[iu][iy] = false
+					solidCells = solidCells + 1
+				else
+					open[iu][iy] = true
+				end
+			end
+		end
+		if solidCells == 0 then
+			return {} -- nothing there after all (the wall is gone or ghost)
+		end
+		-- connected regions of open cells
+		local seen = {}
+		local out = {}
+		for iu = 0, nu - 1 do
+			for iy = 0, ny - 1 do
+				if open[iu][iy] and not (seen[iu] and seen[iu][iy]) then
+					local stack = { { iu, iy } }
+					seen[iu] = seen[iu] or {}
+					seen[iu][iy] = true
+					local u0, u1, y0, y1, cells = iu, iu, iy, iy, 0
+					while #stack > 0 do
+						local c = table.remove(stack)
+						cells = cells + 1
+						u0, u1 = math.min(u0, c[1]), math.max(u1, c[1])
+						y0, y1 = math.min(y0, c[2]), math.max(y1, c[2])
+						for _, d in ipairs({ { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 } }) do
+							local a, b = c[1] + d[1], c[2] + d[2]
+							if a >= 0 and a < nu and b >= 0 and b < ny and open[a][b] and not (seen[a] and seen[a][b]) then
+								seen[a] = seen[a] or {}
+								seen[a][b] = true
+								stack[#stack + 1] = { a, b }
+							end
+						end
+					end
+					local w, h = (u1 - u0 + 1) * su, (y1 - y0 + 1) * sy
+					local touchSide = (u0 == 0 or u1 == nu - 1)
+					local touchTop = (y1 == ny - 1)
+					local touchBottom = (y0 == 0)
+					-- a gap that reaches the end of the wall is just where the wall stops; one that reaches the top is a passage only if it also starts at the floor
+					local valid = (not touchSide) and (not touchTop or (touchBottom and P.height >= 5.5))
+					if valid and w >= 1.8 and h >= 1.8 and cells >= 3 then
+						out[#out + 1] = { u0 = u0, u1 = u1, y0 = y0, y1 = y1, w = w, h = h, bottom = P.y0 + y0 * sy, top = P.y0 + (y1 + 1) * sy, uc = P.u0 + (u0 + u1 + 1) / 2 * su, touchBottom = touchBottom, touchTop = touchTop }
+					end
+				end
+			end
+		end
+		return out
+	end
+
+	local function describe(o)
+		local nm = o.kind == "door" and "doorway" or (o.kind == "hole" and "hole" or "window")
+		return nm
+	end
+
+	-- can a jump get it through an opening whose sill is sillRel above where it takes off and whose top is topRel above that?
+	-- While the body (a stud wider each side) is in the thickness of the wall, its feet must be over the sill (or standing on it) and its head under the top.
+	-- The arc of a jump decides when that is possible; it needs a little slack in the timing (a fraction of a second) or it is not worth trying.
+	-- Returns true and how far from the wall it must take off.
+	local function hopFits(sillRel, topRel, thick, c, margin)
+		margin = margin or 0
+		local hi = topRel - 5.05 - margin
+		if hi < sillRel + 0.05 or sillRel > c.H - 0.2 then
+			return false
+		end
+		local vy0, g, v = c.vy0 or math.sqrt(2 * c.g * c.H), c.g or 196.2, math.max(c.v or 16, 8)
+		local tc = (thick + 2.0) / v
+		local apex = vy0 / g
+		local total = 2 * vy0 / g
+		local function feet(tt, tStart)
+			local y = vy0 * tt - 0.5 * g * tt * tt
+			-- it comes down on the sill only once the middle of the body is over it (a few tenths of a stud in from the edge)
+			if tt > apex and y <= sillRel + 0.05 and tt >= tStart + 0.05 then
+				return sillRel, true -- it has come down on the sill and stands there
+			end
+			return y, false
+		end
+		local bestStart, bestLen, runStart, runLen = nil, 0, nil, 0
+		local t = 0
+		while t <= total do
+			local ok = true
+			for k = 0, 6 do
+				local y, landed = feet(t + tc * k / 6, t)
+				if (not landed and y < sillRel + 0.02) or y > hi then
+					ok = false
+					break
+				end
+			end
+			if ok then
+				runStart = runStart or t
+				runLen = t - runStart
+				if runLen >= bestLen then
+					bestStart, bestLen = runStart, runLen
+				end
+			else
+				runStart, runLen = nil, 0
+			end
+			t = t + 0.005
+		end
+		if bestStart and bestLen >= 0.04 then
+			return true, v * (bestStart + bestLen / 2) + 1.0
+		end
+		return false
+	end
+	Sight.hopFits = hopFits
+
+	-- turn the raw regions of one plane into openings with a floor on both sides
+	local function makeOpenings(P, regions, rp)
+		local list = {}
+		local wneed, hneed, hopNeed = needs()
+		local c = T() and T().caps() or { step = 1, Hsafe = 6.6, drop = 24, H = 7.2 }
+		for _, r in ipairs(regions) do
+			local cpt = P.n * P.d + P.t * r.uc
+			local half = P.thick / 2 + 1.8
+			local Ax, Az = cpt.X + P.n.X * half, cpt.Z + P.n.Z * half
+			local Bx, Bz = cpt.X - P.n.X * half, cpt.Z - P.n.Z * half
+			local hA = floorAt(Ax, r.bottom + 1.5, Az, rp)
+			local hB = floorAt(Bx, r.bottom + 1.5, Bz, rp)
+			local sillA = hA and math.max(0, r.bottom - hA) or nil
+			local sillB = hB and math.max(0, r.bottom - hB) or nil
+			local sillMax = math.max(sillA or 0, sillB or 0)
+			local margin = math.clamp(tonumber(movesRec().holeFail) or 0, 0, 1.5) * 0.5
+			local function side(h, sill)
+				if not h then
+					return false, nil, false
+				end
+				if sill <= c.step + 0.6 then
+					return (r.top - math.max(r.bottom, h)) >= hneed, nil, false
+				end
+				local fits, launch = hopFits(sill, r.top - h, P.thick, c, margin)
+				return fits, launch, true
+			end
+			local fitsAB, launchAB, hopAB = side(hA, sillA or 0)
+			local fitsBA, launchBA, hopBA = side(hB, sillB or 0)
+			-- it falls out on the far side: no more than a drop it can take
+			if fitsAB and (sillB or 0) > c.drop then
+				fitsAB = false
+			end
+			if fitsBA and (sillA or 0) > c.drop then
+				fitsBA = false
+			end
+			local isDoor = r.touchBottom or (sillMax <= c.step + 0.6)
+			local o = {
+				kind = isDoor and "door" or "window",
+				center = Vector3.new(cpt.X, (r.bottom + r.top) / 2, cpt.Z),
+				n = P.n, t = P.t, thick = P.thick,
+				w = r.w, h = r.h, bottom = r.bottom, top = r.top,
+				A = (hA and Vector3.new(Ax, hA, Az)) or nil, B = (hB and Vector3.new(Bx, hB, Bz)) or nil,
+				hA = hA, hB = hB, sillA = sillA, sillB = sillB,
+				fitsAB = fitsAB, fitsBA = fitsBA, launchAB = launchAB, launchBA = launchBA, hopAB = hopAB, hopBA = hopBA,
+				clear = r.top - math.max(r.bottom, math.min(hA or 1e9, hB or 1e9)),
+				seen = os.clock(),
+			}
+			o.pass = r.w >= wneed and (fitsAB or fitsBA) and o.A ~= nil and o.B ~= nil
+			if not o.pass then
+				if r.w < wneed then
+					o.why = ("only %.1f wide"):format(r.w)
+				elseif not (o.A and o.B) then
+					o.why = "nothing to stand on on one side"
+				elseif sillMax > c.Hsafe then
+					o.why = ("the sill is %.1f high"):format(sillMax)
+				else
+					o.why = ("too low for a body to get through (%.1f high, sill %.1f)"):format(r.h, sillMax)
+				end
+			end
+			o.key = string.format("%s:%.1f,%.1f,%.1f", o.kind, o.center.X, o.center.Y, o.center.Z)
+			list[#list + 1] = o
+		end
+		return list
+	end
+
+	------------------------------------------------------------ holes in floors and roofs
+	local function floorGroups(boxes)
+		local F = {}
+		for _, e in ipairs(boxes) do
+			if e.solid and not e.loose and (e.role == "floor" or e.role == "roof") and e.long <= 120 and e.tilt > 0.97 then
+				F[#F + 1] = e
+			end
+		end
+		local parent = {}
+		for i = 1, #F do
+			parent[i] = i
+		end
+		local function find(i)
+			while parent[i] ~= i do
+				parent[i] = parent[parent[i]]
+				i = parent[i]
+			end
+			return i
+		end
+		for i = 1, #F do
+			for j = i + 1, #F do
+				local a, b = F[i], F[j]
+				if math.abs(a.max.Y - b.max.Y) <= 0.6 and b.min.X <= a.max.X + 3 and a.min.X <= b.max.X + 3 and b.min.Z <= a.max.Z + 3 and a.min.Z <= b.max.Z + 3 then
+					parent[find(j)] = find(i)
+				end
+			end
+		end
+		local groups = {}
+		for i, e in ipairs(F) do
+			local r = find(i)
+			groups[r] = groups[r] or {}
+			table.insert(groups[r], e)
+		end
+		local out = {}
+		for _, list in pairs(groups) do
+			local lo = Vector3.new(1e9, 1e9, 1e9)
+			local hi = Vector3.new(-1e9, -1e9, -1e9)
+			local thick = 0
+			for _, e in ipairs(list) do
+				lo = Vector3.new(math.min(lo.X, e.min.X), math.min(lo.Y, e.min.Y), math.min(lo.Z, e.min.Z))
+				hi = Vector3.new(math.max(hi.X, e.max.X), math.max(hi.Y, e.max.Y), math.max(hi.Z, e.max.Z))
+				thick = math.max(thick, e.height)
+			end
+			if #list >= 2 and hi.X - lo.X <= 90 and hi.Z - lo.Z <= 90 then
+				out[#out + 1] = { list = list, min = lo, max = hi, top = hi.Y, thick = thick, key = string.format("f%.1f:%.1f:%.1f:%.1f:%.1f:%d", lo.X, lo.Z, hi.X, hi.Z, hi.Y, #list) }
+			end
+		end
+		return out
+	end
+	-- a floor with an opening in it (a stairwell, a hatch, a missing tile): the cells with nothing under the rays and a floor all around
+	local function groupHoles(Gp, rp, budget)
+		local w, d = Gp.max.X - Gp.min.X, Gp.max.Z - Gp.min.Z
+		local sx, sz = math.max(1, w / 40), math.max(1, d / 40)
+		local nx, nz = math.max(1, math.ceil(w / sx)), math.max(1, math.ceil(d / sz))
+		local open = {}
+		local solidCells = 0
+		for i = 0, nx - 1 do
+			open[i] = {}
+			for j = 0, nz - 1 do
+				local x, z = Gp.min.X + (i + 0.5) * sx, Gp.min.Z + (j + 0.5) * sz
+				local hit = ray(Vector3.new(x, Gp.top + 1.0, z), Vector3.new(0, -(Gp.thick + 1.6), 0), rp)
+				budget.n = budget.n - 1
+				if hit and hit.Instance then
+					open[i][j] = false
+					solidCells = solidCells + 1
+				else
+					open[i][j] = true
+				end
+			end
+		end
+		if solidCells < 4 then
+			return {}
+		end
+		local seen = {}
+		local out = {}
+		for i = 0, nx - 1 do
+			for j = 0, nz - 1 do
+				if open[i][j] and not (seen[i] and seen[i][j]) then
+					local stack = { { i, j } }
+					seen[i] = seen[i] or {}
+					seen[i][j] = true
+					local i0, i1, j0, j1, cells = i, i, j, j, 0
+					while #stack > 0 do
+						local c = table.remove(stack)
+						cells = cells + 1
+						i0, i1 = math.min(i0, c[1]), math.max(i1, c[1])
+						j0, j1 = math.min(j0, c[2]), math.max(j1, c[2])
+						for _, dd in ipairs({ { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 } }) do
+							local a, b = c[1] + dd[1], c[2] + dd[2]
+							if a >= 0 and a < nx and b >= 0 and b < nz and open[a][b] and not (seen[a] and seen[a][b]) then
+								seen[a] = seen[a] or {}
+								seen[a][b] = true
+								stack[#stack + 1] = { a, b }
+							end
+						end
+					end
+					if i0 > 0 and j0 > 0 and i1 < nx - 1 and j1 < nz - 1 then
+						local hw, hd = (i1 - i0 + 1) * sx, (j1 - j0 + 1) * sz
+						if hw >= 2.2 and hd >= 2.2 then
+							local cx, cz = Gp.min.X + (i0 + i1 + 1) / 2 * sx, Gp.min.Z + (j0 + j1 + 1) / 2 * sz
+							out[#out + 1] = { cx = cx, cz = cz, w = hw, d = hd }
+						end
+					end
+				end
+			end
+		end
+		return out
+	end
+	local function makeHoles(Gp, regions, rp)
+		local list = {}
+		local wneed = needs()
+		local c = T() and T().caps() or { step = 1, Hsafe = 6.6, drop = 24, H = 7.2 }
+		for _, r in ipairs(regions) do
+			local below = ray(Vector3.new(r.cx, Gp.top - Gp.thick - 0.4, r.cz), Vector3.new(0, -80, 0), rp)
+			local lowerY = below and below.Instance and below.Position.Y or nil
+			local rim = {}
+			for _, off in ipairs({ { r.w / 2 + 1.3, 0 }, { -(r.w / 2 + 1.3), 0 }, { 0, r.d / 2 + 1.3 }, { 0, -(r.d / 2 + 1.3) } }) do
+				rim[#rim + 1] = Vector3.new(r.cx + off[1], Gp.top, r.cz + off[2])
+			end
+			local o = {
+				kind = "hole", center = Vector3.new(r.cx, Gp.top, r.cz), w = math.min(r.w, r.d), d = math.max(r.w, r.d), top = Gp.top, bottom = Gp.top - Gp.thick,
+				lowerY = lowerY, rim = rim, thick = Gp.thick, seen = os.clock(),
+			}
+			local fall = lowerY and (Gp.top - lowerY) or nil
+			o.fall = fall
+			o.pass = fall ~= nil and o.w >= wneed and fall <= c.drop
+			o.up = fall ~= nil and fall <= c.Hsafe - 0.4 and o.w >= wneed + 0.3
+			if not o.pass then
+				o.why = fall == nil and "no floor below it" or (o.w < wneed and ("only %.1f wide"):format(o.w) or ("%.0f studs down"):format(fall))
+			end
+			o.key = string.format("hole:%.1f,%.1f,%.1f", r.cx, Gp.top, r.cz)
+			list[#list + 1] = o
+		end
+		return list
+	end
+
+	-- find the openings around: walls and floors nearest first, with a ray budget (what was done before is remembered for a while)
+	function Sight.scan(force, maxRays)
+		if not on() then
+			Sight.openings = {}
+			return Sight.openings
+		end
+		local _, root = parts()
+		if not root then
+			return Sight.openings
+		end
+		Sight.look(force)
+		local now = os.clock()
+		if not force and Sight.scanAt and now - Sight.scanAt < 3 and Sight.scanCenter and flat(root.Position, Sight.scanCenter) < 14 then
+			return Sight.openings
+		end
+		Sight.scanAt, Sight.scanCenter = now, root.Position
+		local rp = rparams()
+		local budget = { n = maxRays or 3500 }
+		local all = {}
+		local planes = wallPlanes(Sight.boxes)
+		table.sort(planes, function(a, b)
+			local ca = a.n * a.d + a.t * ((a.u0 + a.u1) / 2)
+			local cb = b.n * b.d + b.t * ((b.u0 + b.u1) / 2)
+			return flat(ca, root.Position) < flat(cb, root.Position)
+		end)
+		Sight.planes = planes
+		for _, P in ipairs(planes) do
+			local ent = planeCache[P.key]
+			if not ent or now - ent.at > 25 then
+				if budget.n > 0 then
+					local regions = planeOpenings(P, rp, budget)
+					ent = { list = makeOpenings(P, regions, rp), at = now }
+					planeCache[P.key] = ent
+				end
+			end
+			if ent then
+				for _, o in ipairs(ent.list) do
+					all[#all + 1] = o
+				end
+			end
+		end
+		for _, Gp in ipairs(floorGroups(Sight.boxes)) do
+			local ent = planeCache[Gp.key]
+			if not ent or now - ent.at > 25 then
+				if budget.n > 0 then
+					local regions = groupHoles(Gp, rp, budget)
+					ent = { list = makeHoles(Gp, regions, rp), at = now }
+					planeCache[Gp.key] = ent
+				end
+			end
+			if ent then
+				for _, o in ipairs(ent.list) do
+					all[#all + 1] = o
+				end
+			end
+		end
+		-- keep the cache small
+		local n = 0
+		for k, ent in pairs(planeCache) do
+			n = n + 1
+			if now - ent.at > 120 then
+				planeCache[k] = nil
+			end
+		end
+		table.sort(all, function(a, b)
+			return flat(a.center, root.Position) < flat(b.center, root.Position)
+		end)
+		Sight.openings = all
+		Sight.stats.openings = #all
+		return all
+	end
+
+	function Sight.reset()
+		Sight.boxes, Sight.structs, Sight.openings, Sight.planes = {}, {}, {}, {}
+		planeCache, BAD = {}, {}
+		Sight.at, Sight.scanAt, Sight.center = -1e9, nil, nil
+	end
+
+	------------------------------------------------------------ openings as roads for the route planner
+	-- the openings that can be used, as edges between two places on the map. G: the map grid.
+	function Sight.portalEdges(G)
+		if G._portals then
+			return G._portals
+		end
+		local Tr = T()
+		local out = {}
+		G._portals = out
+		if not (on() and Tr) then
+			return out
+		end
+		local list = Sight.scan(false, 1800)
+		local c = Tr.caps()
+		local now = os.clock()
+		local function add(from, to, o, mode, extra, hop)
+			if from and to and from ~= to then
+				out[from] = out[from] or {}
+				table.insert(out[from], { to = to, o = o, mode = mode, extra = extra, hop = hop })
+			end
+		end
+		for _, o in ipairs(list) do
+			local bad = BAD[o.key]
+			if o.pass and not (bad and bad > now) then
+				if o.kind == "hole" then
+					local lowerN = o.lowerY and Tr.nodeNear(G, o.center.X, o.center.Z, o.lowerY, 2.2)
+					for _, rp in ipairs(o.rim) do
+						local topN = Tr.nodeNear(G, rp.X, rp.Z, o.top, 1.6)
+						if topN and lowerN and G.h[topN] and math.abs(G.h[topN] - o.top) <= 1.6 then
+							add(topN, lowerN, o, "down", 1.0)
+							if o.up then
+								add(lowerN, topN, o, "up", 2.0, true)
+							end
+							break
+						end
+					end
+				else
+					local nA = Tr.nodeNear(G, o.A.X, o.A.Z, o.hA, 1.8)
+					local nB = Tr.nodeNear(G, o.B.X, o.B.Z, o.hB, 1.8)
+					if nA and nB and G.h[nA] and G.h[nB] and math.abs(G.h[nA] - o.hA) <= 1.8 and math.abs(G.h[nB] - o.hB) <= 1.8 then
+						-- from A to B (and back): walking through, or a jump that carries it through the frame
+						if o.fitsAB then
+							add(nA, nB, o, "AB", (o.hopAB and 1.0 or 0.2) + (o.kind == "window" and 0.8 or 0), o.hopAB)
+						end
+						if o.fitsBA then
+							add(nB, nA, o, "BA", (o.hopBA and 1.0 or 0.2) + (o.kind == "window" and 0.8 or 0), o.hopBA)
+						end
+					end
+				end
+			end
+		end
+		return out
+	end
+
+	function Sight.markBad(o, secs)
+		if o and o.key then
+			BAD[o.key] = os.clock() + (secs or 60)
+		end
+	end
+
+	------------------------------------------------------------ going through one
+	-- mode: "AB" / "BA" (a door or a window), "down" / "up" (a hole). Returns true when it is on the other side.
+	function Sight.cross(o, mode, tok)
+		local char, root, hum = parts()
+		if not (root and hum) then
+			return false
+		end
+		local Tr = T()
+		local c = Tr and Tr.caps() or { step = 1, Hsafe = 6.6, v = 16, H = 7.2, g = 196.2 }
+		local t0 = os.clock()
+		local function alive()
+			return Alive and (not tok or tok == Body.token) and Legs.can() and os.clock() - t0 < 14
+		end
+		local ok = false
+		if o.kind == "hole" then
+			local target = o.center
+			-- line up on the middle of the hole
+			while alive() do
+				char, root, hum = parts()
+				if not (root and hum) then
+					return false
+				end
+				local d = flat(root.Position, target)
+				if mode == "down" then
+					if d < 0.7 or root.Position.Y < o.top - 1.5 then
+						break
+					end
+					Legs.moveTo(hum, Vector3.new(target.X, root.Position.Y, target.Z))
+				else
+					if d < 0.8 then
+						Legs.jump(hum, true)
+						break
+					end
+					Legs.moveTo(hum, Vector3.new(target.X, root.Position.Y, target.Z))
+				end
+				task.wait(0.03)
+			end
+			local t1 = os.clock()
+			while alive() and os.clock() - t1 < 2.5 do
+				char, root, hum = parts()
+				if not (root and hum) then
+					return false
+				end
+				local feet = Tr and Tr.feetOf(root, hum) or root.Position.Y - 3
+				Legs.moveTo(hum, Vector3.new(target.X, root.Position.Y, target.Z))
+				if mode == "down" and feet < o.top - 1.5 and hum.FloorMaterial ~= Enum.Material.Air then
+					ok = true
+					break
+				elseif mode == "up" and feet >= o.top - 0.6 then
+					ok = true
+					break
+				end
+				task.wait(0.03)
+			end
+		else
+			local dirv = (mode == "AB") and -o.n or o.n -- the way it goes through (from the side it is on to the other)
+			local center = Vector3.new(o.center.X, 0, o.center.Z)
+			local needHop = (mode == "AB") and o.hopAB or o.hopBA
+			local launch = ((mode == "AB") and o.launchAB or o.launchBA) or 3.0
+			local front = center - dirv * (o.thick / 2 + math.max(3.2, launch + 2.2))
+			local back = center + dirv * (o.thick / 2 + 4.5)
+			local function along()
+				local _, r = parts()
+				if not r then
+					return -99, 99
+				end
+				local rel = Vector3.new(r.Position.X - center.X, 0, r.Position.Z - center.Z)
+				return rel:Dot(dirv), rel:Dot(o.t)
+			end
+			-- 1) the middle of the front: so the shoulders miss the frame
+			local lined = false
+			while alive() do
+				char, root, hum = parts()
+				if not (root and hum) then
+					return false
+				end
+				local a, lat = along()
+				if a > -launch - o.thick / 2 - 0.3 and math.abs(lat) < 0.5 and (needHop or a > -0.6 - o.thick / 2) then
+					lined = true -- already lined up in front of it (it was walking there)
+					break
+				end
+				local fp = Vector3.new(front.X, root.Position.Y, front.Z)
+				if flat(root.Position, fp) < 0.55 or (a > -(o.thick / 2 + math.max(3.6, launch + 2.6)) and math.abs(lat) < 0.45) then
+					lined = true
+					break
+				end
+				Legs.moveTo(hum, fp)
+				task.wait(0.03)
+			end
+			if not lined then
+				Sight.stats.failed = Sight.stats.failed + 1
+				Sight.markBad(o, 40)
+				return false
+			end
+			-- 2) straight through at speed: jump at the right distance from the sill, never stop in the frame
+			local jumped = false
+			local lastP, stall = nil, 0
+			while alive() do
+				char, root, hum = parts()
+				if not (root and hum) then
+					return false
+				end
+				local a, lat = along()
+				local aim = Vector3.new(back.X, root.Position.Y, back.Z)
+				-- keep the middle of the frame while approaching
+				if a < -o.thick / 2 - 0.3 and math.abs(lat) > 0.3 then
+					aim = Vector3.new(center.X - dirv.X * 0.5, root.Position.Y, center.Z - dirv.Z * 0.5)
+					aim = aim + dirv * 1.5
+				end
+				Legs.moveTo(hum, aim)
+				if needHop and not jumped and a >= -launch - o.thick / 2 then
+					if Legs.jump(hum, true) then
+						jumped = true
+						Body.stats.jumps = Body.stats.jumps + 1
+					end
+				end
+				if a > o.thick / 2 + 0.9 then
+					ok = true
+					break
+				end
+				if lastP and (root.Position - lastP).Magnitude < 0.04 then
+					stall = stall + 1
+					if stall > 40 then
+						break
+					end
+				else
+					stall = 0
+				end
+				lastP = root.Position
+				task.wait(0.03)
+			end
+			if ok then
+				-- a few more steps so it is clear of the frame
+				local t2 = os.clock()
+				while alive() and os.clock() - t2 < 0.35 do
+					char, root, hum = parts()
+					if not (root and hum) then
+						break
+					end
+					Legs.moveTo(hum, Vector3.new(back.X, root.Position.Y, back.Z))
+					task.wait(0.03)
+				end
+			end
+		end
+		if ok then
+			Sight.stats.crossed = Sight.stats.crossed + 1
+			local m = movesRec()
+			m.openOk = (tonumber(m.openOk) or 0) + 1
+		else
+			Sight.stats.failed = Sight.stats.failed + 1
+			Sight.markBad(o, 45)
+			if o.kind ~= "hole" then
+				local m = movesRec()
+				m.holeFail = math.min(1.5, (tonumber(m.holeFail) or 0) + 0.3)
+			end
+		end
+		return ok
+	end
+
+	------------------------------------------------------------ what it knows, in words
+	local function dir8(from, to)
+		local dx, dz = to.X - from.X, to.Z - from.Z
+		local a = math.deg(math.atan2(dx, -dz)) % 360
+		local names = { "north", "north-east", "east", "south-east", "south", "south-west", "west", "north-west" }
+		return names[(math.floor((a + 22.5) / 45) % 8) + 1]
+	end
+	function Sight.openingText(o, from)
+		local where = from and (dir8(from, o.center) .. ", " .. math.floor(flat(from, o.center) + 0.5) .. " studs") or ""
+		if o.kind == "hole" then
+			return ("hole in the %s (%.0fx%.0f)%s %s"):format(o.top > (Sight.groundY or 0) + 8 and "roof/floor" or "floor", o.w, o.d, o.pass and (o.fall and (", " .. math.floor(o.fall + 0.5) .. " down") or "") or (", cannot use: " .. tostring(o.why)), where)
+		end
+		local s = ("%s %.0fx%.0f"):format(describe(o), o.w, o.h)
+		local sill = math.max(o.sillA or 0, o.sillB or 0)
+		if sill > 1.6 then
+			s = s .. (", sill %.1f high"):format(sill)
+		end
+		s = s .. (o.pass and ((o.hopAB or o.hopBA) and ", it can jump through" or ", it can walk through") or (", it cannot get through (" .. tostring(o.why) .. ")"))
+		return s .. (where ~= "" and (" to the " .. where) or "")
+	end
+	-- the box it stands on and how far the edges are, in the 8 directions
+	function Sight.here()
+		local _, root, hum = parts()
+		local Tr = T()
+		if not (root and Tr) then
+			return nil
+		end
+		local feet = Tr.feetOf(root, hum)
+		local hit = ray(Vector3.new(root.Position.X, feet + 2, root.Position.Z), Vector3.new(0, -8, 0), rparams())
+		if not (hit and hit.Instance) then
+			return nil
+		end
+		local ok, ed = pcall(Tr.edges, 12)
+		if not (ok and ed) then
+			return nil
+		end
+		local list = {}
+		for _, d in ipairs(ed.dirs or {}) do
+			if d.d and (not d.wall or d.d < d.wall) then
+				list[#list + 1] = d
+			end
+		end
+		table.sort(list, function(a, b)
+			return a.d < b.d
+		end)
+		local e = Sight.byPart and Sight.byPart[hit.Instance] or nil
+		return { part = hit.Instance, box = e, y = hit.Position.Y, edges = list }
+	end
+	function Sight.text()
+		if not on() then
+			return ""
+		end
+		local _, root = parts()
+		if not root or #Sight.boxes == 0 then
+			return ""
+		end
+		local L = {}
+		local okh, here = pcall(Sight.here)
+		if okh and here and #here.edges > 0 then
+			local bits = {}
+			for i = 1, math.min(3, #here.edges) do
+				local d = here.edges[i]
+				bits[#bits + 1] = ("%s %.1f studs (%s)"):format(dir8(Vector3.new(0, 0, 0), d.dir), d.d, d.void and "empty below" or (("drops %d"):format(math.floor((d.drop or 0) + 0.5))))
+			end
+			local what = here.box and ("%s (%s %.0fx%.1fx%.0f)"):format(here.box.name, here.box.role, here.box.size.X, here.box.size.Y, here.box.size.Z) or here.part.Name
+			L[#L + 1] = ("standing on %s, top at height %.0f; edges: %s"):format(what, here.y, table.concat(bits, ", "))
+		end
+		local shown = 0
+		for _, s in ipairs(Sight.structs) do
+			if s.dist <= 55 and shown < 3 and (s.kind == "building" or s.kind == "walls") then
+				shown = shown + 1
+				local parts2 = {}
+				for _, o in ipairs(Sight.openings) do
+					if o.kind ~= "hole" and flat(o.center, s.center) <= math.max(s.size.X, s.size.Z) / 2 + 3 and #parts2 < 4 then
+						parts2[#parts2 + 1] = Sight.openingText(o, s.center)
+					end
+				end
+				L[#L + 1] = ("%s %s %.0fx%.0fx%.0f at (%d,%d): %d walls%s%s"):format(s.kind, s.name and ('"' .. s.name .. '"') or "", s.size.X, s.size.Y, s.size.Z, math.floor(s.center.X), math.floor(s.center.Z), s.n.wall or 0, s.roofs > 0 and ", roof" or ", no roof", #parts2 > 0 and ("; openings: " .. table.concat(parts2, "; ")) or "; no way in that I can see")
+			end
+		end
+		local holes = {}
+		for _, o in ipairs(Sight.openings) do
+			if o.kind == "hole" and #holes < 2 and flat(o.center, root.Position) <= 40 then
+				holes[#holes + 1] = Sight.openingText(o, root.Position)
+			end
+		end
+		if #holes > 0 then
+			L[#L + 1] = table.concat(holes, "; ")
+		end
+		local props, loose = {}, {}
+		for _, e in ipairs(Sight.boxes) do
+			if e.role == "prop" and e.solid and #props < 4 and flat(e.center, root.Position) <= 25 then
+				props[#props + 1] = ("%s %.0fx%.0fx%.0f"):format(e.name, e.size.X, e.size.Y, e.size.Z)
+			elseif e.loose and e.solid and e.role ~= "ground" and #loose < 3 and flat(e.center, root.Position) <= 30 then
+				loose[#loose + 1] = e.name .. (e.moving and " (moving)" or " (loose, can be pushed)")
+			end
+		end
+		if #props > 0 then
+			L[#L + 1] = "furniture/props: " .. table.concat(props, ", ")
+		end
+		if #loose > 0 then
+			L[#L + 1] = "not fixed to the ground: " .. table.concat(loose, ", ")
+		end
+		if #L == 0 then
+			return ""
+		end
+		return "SHAPES I SEE (3D boxes): " .. table.concat(L, " | ")
+	end
+	function Sight.summary()
+		local n = { floor = 0, wall = 0, roof = 0, pillar = 0, prop = 0, glass = 0, loose = 0 }
+		for _, e in ipairs(Sight.boxes) do
+			if n[e.role] then
+				n[e.role] = n[e.role] + 1
+			end
+			if e.loose then
+				n.loose = n.loose + 1
+			end
+		end
+		local doors, windows, holes = 0, 0, 0
+		for _, o in ipairs(Sight.openings) do
+			if o.kind == "door" then
+				doors = doors + 1
+			elseif o.kind == "window" then
+				windows = windows + 1
+			else
+				holes = holes + 1
+			end
+		end
+		return ("%d boxes (%d floors, %d walls, %d roofs, %d pillars, %d props, %d loose), %d structures, %d doorways, %d windows, %d holes"):format(#Sight.boxes, n.floor, n.wall, n.roof, n.pillar, n.prop, n.loose, #Sight.structs, doors, windows, holes)
+	end
+
+	------------------------------------------------------------ the overlay: what it sees, drawn in the world
+	local COLORS = {
+		floor = Color3.fromRGB(70, 150, 255), roof = Color3.fromRGB(170, 110, 255), wall = Color3.fromRGB(255, 165, 50), pillar = Color3.fromRGB(255, 120, 190),
+		block = Color3.fromRGB(200, 200, 210), prop = Color3.fromRGB(70, 220, 120), glass = Color3.fromRGB(80, 230, 255), hazard = Color3.fromRGB(255, 60, 60),
+		ramp = Color3.fromRGB(120, 200, 255), ladder = Color3.fromRGB(240, 220, 90), ghost = Color3.fromRGB(150, 150, 150), loose = Color3.fromRGB(255, 235, 60),
+	}
+	local OPEN_OK, OPEN_NO = Color3.fromRGB(60, 255, 120), Color3.fromRGB(255, 90, 90)
+	local folder, anchor
+	local pool, used = {}, 0
+	local function ensureFolder()
+		if folder and folder.Parent and anchor and anchor.Parent then
+			return true
+		end
+		local ok = pcall(function()
+			local cam = workspace.CurrentCamera
+			if not cam then
+				error("no camera")
+			end
+			folder = Instance.new("Folder")
+			folder.Name = "SZSight"
+			World.markOwn(folder)
+			folder.Parent = cam
+			anchor = Instance.new("Part")
+			anchor.Name = "SZSightAnchor"
+			anchor.Anchored, anchor.CanCollide, anchor.CanQuery, anchor.CanTouch, anchor.CastShadow = true, false, false, false, false
+			anchor.Transparency = 1
+			anchor.Size = Vector3.new(1, 1, 1)
+			anchor.CFrame = CFrame.new(0, 0, 0)
+			World.markOwn(anchor)
+			anchor.Parent = folder
+		end)
+		if not ok then
+			folder, anchor = nil, nil
+			return false
+		end
+		pool, used = {}, 0
+		return true
+	end
+	local function adorn(adornee, cf, size, color, trans, z)
+		used = used + 1
+		local a = pool[used]
+		if not (a and a.Parent) then
+			local ok, made = pcall(function()
+				local b = Instance.new("BoxHandleAdornment")
+				b.AlwaysOnTop = true
+				b.Parent = folder
+				return b
+			end)
+			if not (ok and made) then
+				used = used - 1
+				return
+			end
+			a = made
+			pool[used] = a
+		end
+		pcall(function()
+			a.Adornee = adornee
+			a.Size = size
+			if cf then
+				a.CFrame = cf
+			else
+				a.CFrame = CFrame.new(0, 0, 0)
+			end
+			a.Color3 = color
+			a.Transparency = trans
+			a.ZIndex = z or 1
+			a.Visible = true
+		end)
+	end
+	function Sight.hide()
+		for i = 1, #pool do
+			pcall(function()
+				pool[i].Visible = false
+			end)
+		end
+		used = 0
+	end
+	function Sight.drawOnce()
+		if not ensureFolder() then
+			return
+		end
+		local _, root = parts()
+		if not root then
+			return
+		end
+		Sight.look(false)
+		Sight.scan(false, 1500)
+		used = 0
+		local nBoxes = 0
+		for _, e in ipairs(Sight.boxes) do
+			if nBoxes >= 160 then
+				break
+			end
+			if e.role ~= "ground" and flat(e.center, root.Position) <= 55 then
+				local col = e.loose and COLORS.loose or COLORS[e.role] or COLORS.block
+				adorn(e.part, nil, e.size, col, e.role == "ghost" and 0.9 or 0.72, 1)
+				nBoxes = nBoxes + 1
+			end
+		end
+		for _, o in ipairs(Sight.openings) do
+			if flat(o.center, root.Position) <= 55 then
+				local col = o.pass and OPEN_OK or OPEN_NO
+				if o.kind == "hole" then
+					adorn(anchor, CFrame.new(o.center.X, o.top - 0.2, o.center.Z), Vector3.new(o.w, 0.4, o.d), col, 0.25, 3)
+				else
+					local cf = CFrame.lookAt(o.center, o.center + o.n)
+					adorn(anchor, cf, Vector3.new(o.w, o.h, math.max(0.3, o.thick + 0.4)), col, 0.3, 3)
+				end
+			end
+		end
+		-- the edge of what it stands on
+		local Tr = T()
+		if Tr and Tr.edges then
+			local ok, ed = pcall(Tr.edges, 14)
+			if ok and ed and ed.dirs then
+				for _, d in ipairs(ed.dirs) do
+					if d.d and d.dir then
+						local p = Vector3.new(root.Position.X, root.Position.Y - 3, root.Position.Z) + d.dir * d.d
+						adorn(anchor, CFrame.new(p.X, p.Y, p.Z), Vector3.new(0.5, 0.5, 0.5), Color3.fromRGB(255, 40, 40), 0.1, 4)
+					end
+				end
+			end
+		end
+		for i = used + 1, #pool do
+			pcall(function()
+				pool[i].Visible = false
+			end)
+		end
+	end
+	local drawing = false
+	function Sight.showLoop()
+		if drawing then
+			return
+		end
+		drawing = true
+		task.spawn(function()
+			while Alive and cfg.SeeBoxes == true do
+				local ok = pcall(Sight.drawOnce)
+				task.wait(ok and 0.7 or 3)
+			end
+			drawing = false
+			pcall(Sight.hide)
+		end)
+	end
+	-- the switch (from the Play tab)
+	function Sight.setShow(v)
+		cfg.SeeBoxes = v and true or false
+		saveCfg()
+		if cfg.SeeBoxes then
+			Sight.showLoop()
+		else
+			pcall(Sight.hide)
+		end
+	end
+	function Sight.drawing()
+		return drawing
+	end
+	if cfg.SeeBoxes == true then
+		task.defer(Sight.showLoop)
+	end
+	track({ Disconnect = function()
+		pcall(function()
+			if folder then
+				folder:Destroy()
+			end
+		end)
+		folder, anchor, pool = nil, nil, {}
+	end })
 end)()
 ------------------------------------------------------------------ sight: what it can see, what it can actually get to, and what is only on the other side of a wall
 ;(function()
@@ -12279,7 +14064,7 @@ end)()
 						lastDodge = now
 						Killers.stats.dodges = Killers.stats.dodges + 1
 						if botY - feet > 1.5 and Terrain and Terrain.grounded(hum) == true and (topY - botY) < 4 and vel.Y <= 0.5 and (botY - feet) < Terrain.caps().Hsafe then
-							Legs.jump(hum)
+							Legs.jump(hum, true)
 						end
 						Legs.moveTo(hum, root.Position + away * 7)
 						if Brain.Body then
@@ -12997,7 +14782,7 @@ end)()
 						Body.reason("I was stuck with it close, running straight away from it")
 						local dest = Body.escapePoint(root, char, near)
 						Legs.moveTo(hum, dest)
-						Legs.jump(hum)
+						Legs.jump(hum, true)
 						task.wait(0.5)
 						stillAt, stillT = nil, os.clock()
 					end
@@ -14696,6 +16481,14 @@ end)()
 		local m = it.cls.main
 		return m == "melee" or m == "ranged" or (it.cls.dual and m ~= "heal")
 	end
+	function Gear.recOf(tool)
+		local ok, c = pcall(classify, tool)
+		return ok and c and c.rec or nil
+	end
+	function Gear.cls(tool)
+		local ok, c = pcall(classify, tool)
+		return ok and c and c.main or nil
+	end
 	function Gear.isWeapon(tool)
 		if not tool then
 			return false
@@ -15781,9 +17574,2203 @@ end)()
 		return cfg.AICamera
 	end
 end)()
+------------------------------------------------------------------ ledger: things that are known not to work are never tried again
+-- A button, prompt or item that needs Robux / a game pass / VIP, that said "not enough coins" or "locked" or "requires level 20", or that did nothing
+-- three times, goes into this list (kept in the game's file). The planner never sees it as a choice, and every press goes through the same check.
+--   hard block: needs Robux, a game pass, VIP or premium -> forever
+--   soft block: not enough money, locked until a level, cooling down -> comes back after a while, or when the owner orders it
+;(function()
+	local Ledger = { stats = { blocked = 0, skipped = 0 } }
+	Brain.Ledger = Ledger
+	local Games = Brain.Games
+
+	local HARD = { "robux", "r$", "gamepass", "game pass", "game-pass", "premium", "vip only", "vip required", "vip members", "members only", "buy now", "purchase required", "not available in your", "exclusive to", "developer product" }
+	local SOFT = { "not enough", "need more", "insufficient", "cannot afford", "can't afford", "cant afford", "too expensive", "you need", "requires level", "required level", "reach level", "unlock at", "locked", "unlocks at", "come back", "cooldown", "on cooldown", "already owned", "already have", "sold out", "out of stock", "wait " }
+	-- text -> reason, hard
+	function Ledger.scan(text)
+		local t = " " .. tostring(text or ""):lower() .. " "
+		if #t < 5 then
+			return nil
+		end
+		for _, w in ipairs(HARD) do
+			if t:find(w, 1, true) then
+				return "it needs " .. (w == "r$" and "Robux" or w), true
+			end
+		end
+		for _, w in ipairs(SOFT) do
+			if t:find(w, 1, true) then
+				return "the game said: " .. (tostring(text):gsub("%s+", " "):sub(1, 60)), false
+			end
+		end
+		return nil
+	end
+
+	local function know()
+		local g = Games.cur(false)
+		if not g then
+			return {}
+		end
+		if type(g.know.blocked) ~= "table" then
+			g.know.blocked = {}
+		end
+		return g.know.blocked
+	end
+	function Ledger.key(kind, label)
+		local l = tostring(label or ""):lower():gsub("%s+", " "):gsub("^ ", ""):gsub(" $", "")
+		return tostring(kind or "?") .. ":" .. l:sub(1, 40)
+	end
+	function Ledger.keyOf(t)
+		return Ledger.key(t.kind, t.label)
+	end
+	function Ledger.isBlocked(key)
+		local r = know()[key]
+		if not r then
+			return false
+		end
+		if r.hard then
+			return true, r.why
+		end
+		if r.untilT and os.time() >= r.untilT then
+			return false -- the waiting time is over: it may try again
+		end
+		return true, r.why
+	end
+	function Ledger.blockedTarget(t, ignoreSoft)
+		if not t then
+			return false
+		end
+		local key = Ledger.keyOf(t)
+		local b, why = Ledger.isBlocked(key)
+		if b and ignoreSoft then
+			local r = know()[key]
+			return r and r.hard, why
+		end
+		return b, why
+	end
+	function Ledger.block(key, why, hard)
+		local k = know()
+		local r = k[key]
+		local first = not r
+		if not r then
+			r = { n = 0 }
+			k[key] = r
+			local n = 0
+			for _ in pairs(k) do
+				n = n + 1
+			end
+			if n > 80 then
+				local oldest, ok
+				for kk, v in pairs(k) do
+					if kk ~= key and (not oldest or (v.t or 0) < oldest) then
+						oldest, ok = v.t or 0, kk
+					end
+				end
+				if ok then
+					k[ok] = nil
+				end
+			end
+		end
+		r.n = r.n + 1
+		r.why = tostring(why or "it does not work"):sub(1, 80)
+		r.hard = hard and true or false
+		r.t = os.time()
+		r.untilT = hard and nil or (os.time() + math.min(900, 240 * r.n))
+		Ledger.stats.blocked = Ledger.stats.blocked + 1
+		Games.save()
+		if first and Brain.Pilot and Brain.Pilot.say then
+			Brain.Pilot.say(("Learned: %s is blocked, %s"):format(key:gsub("^%w+:", ""), r.why))
+			pcall(World.lesson, ("%s: %s, do not try it again"):format(key:gsub("^%w+:", ""), r.why))
+		end
+		return r
+	end
+	function Ledger.unblock(key)
+		local k = know()
+		if k[key] then
+			k[key] = nil
+			Games.save()
+		end
+	end
+	-- what is on the screen right now as text (a set), to see what appeared after pressing something
+	function Ledger.snap()
+		local set = {}
+		local pg = lp:FindFirstChildOfClass("PlayerGui")
+		if not pg then
+			return set
+		end
+		pcall(function()
+			local n = 0
+			for _, d in ipairs(pg:GetDescendants()) do
+				if (d:IsA("TextLabel") or d:IsA("TextButton")) and not World.isOwn(d) and d.Visible ~= false then
+					local t = tostring(d.Text or "")
+					if #t >= 4 and #t <= 140 then
+						set[t] = true
+					end
+					n = n + 1
+					if n > 600 then
+						break
+					end
+				end
+			end
+		end)
+		return set
+	end
+	-- after pressing/using something: new text that says it is blocked -> into the ledger. "changed" is whether the press showed any effect.
+	-- returns the reason when it was blocked
+	function Ledger.after(t, before, changed)
+		if not t then
+			return nil
+		end
+		local key = Ledger.keyOf(t)
+		local reason, hard
+		task.wait(0.35)
+		local now = Ledger.snap()
+		for text in pairs(now) do
+			if not before[text] then
+				local r, h = Ledger.scan(text)
+				if r then
+					reason, hard = r, h
+					if h then
+						break
+					end
+				end
+			end
+		end
+		-- the thing's own label can say it costs something
+		if not reason then
+			local r, h = Ledger.scan(t.label)
+			if r and h then
+				reason, hard = r, h
+			end
+		end
+		if reason then
+			Ledger.block(key, reason, hard)
+			return reason
+		end
+		-- three presses with nothing happening: stop trying for a while
+		local k = know()
+		local rec = k["tried:" .. key] or { n = 0 }
+		if changed then
+			k["tried:" .. key] = nil
+		else
+			rec.n = rec.n + 1
+			rec.t = os.time()
+			k["tried:" .. key] = rec
+			if rec.n >= 3 then
+				k["tried:" .. key] = nil
+				Ledger.block(key, "pressing it did nothing 3 times", false)
+				return "did nothing"
+			end
+		end
+		return nil
+	end
+	-- what the planner is told
+	function Ledger.text()
+		local k = know()
+		local L = {}
+		local keys = {}
+		for key, r in pairs(k) do
+			if not key:find("^tried:") and Ledger.isBlocked(key) then
+				keys[#keys + 1] = key
+			end
+		end
+		table.sort(keys)
+		for i = 1, math.min(8, #keys) do
+			local r = k[keys[i]]
+			L[#L + 1] = ("%s (%s)"):format(keys[i]:gsub("^%w+:", ""), r.why)
+		end
+		if #L == 0 then
+			return ""
+		end
+		return "Known blocked, do not try these (they cost Robux, are locked, or did nothing): " .. table.concat(L, "; ") .. ". If money is the problem, earn more first (quests, collecting)."
+	end
+end)()
+------------------------------------------------------------------ combat: the numbers behind fight-or-flee, reloading, and finding a weapon that is free
+-- It learns, per kind of enemy, how hard it hits and how much health it has, and per weapon how much damage one swing does to it.
+-- With that it works out: how long until the enemy is down (ttk), how long until I am (ttd), how many enemies are close, and decides
+--   * hit by a creature and holding (or owning) a weapon that works -> fight back, unless the maths says it loses
+--   * no weapon -> run, and look for a weapon that is lying around for free (never one that costs Robux)
+--   * health low and the enemy's damage is known -> stop fighting and run before it is too late
+-- Guns: when the magazine is empty it reloads the way the game wants (a Reload button, the key the screen shows, or R), and remembers which worked.
+;(function()
+	local Combat = { log = {}, lastSay = {}, hist = {}, foesSeen = {}, stats = { fights = 0, wins = 0, retreats = 0, reloads = 0, finds = 0, calcs = 0 }, running = false }
+	Brain.Combat = Combat
+	local Games, Body, Threat, Sense, Gear = Brain.Games, Brain.Body, Brain.Threat, Brain.Sense, Brain.Gear
+	local Legs = Core.Legs
+	local M = World.mouse
+	local SWING = 0.6 -- seconds between swings when it fights (what Body.attack does)
+
+	local function parts()
+		local c = lp.Character
+		return c, c and c:FindFirstChild("HumanoidRootPart"), c and c:FindFirstChildOfClass("Humanoid")
+	end
+	local function flat(a, b)
+		return math.sqrt((a.X - b.X) ^ 2 + (a.Z - b.Z) ^ 2)
+	end
+	local function on()
+		return cfg.Combat ~= false and Core.on()
+	end
+	local function say(key, msg, gap)
+		local now = os.clock()
+		if Combat.lastSay[key] and now - Combat.lastSay[key] < (gap or 40) then
+			return
+		end
+		Combat.lastSay[key] = now
+		Combat.log[#Combat.log + 1] = os.date("%H:%M:%S", os.time()) .. "  " .. msg
+		while #Combat.log > 24 do
+			table.remove(Combat.log, 1)
+		end
+		if Brain.Pilot and Brain.Pilot.say then
+			Brain.Pilot.say(msg)
+		end
+		if Combat.onChange then
+			pcall(Combat.onChange)
+		end
+	end
+	local function r1(n)
+		return math.floor(n * 10 + 0.5) / 10
+	end
+
+	------------------------------------------------------------ what it knows (kept in the game's file, so the next visit starts with it)
+	local function kn()
+		local g = Games.cur()
+		if not g then
+			return { foes = {}, weapons = {}, reload = {} }
+		end
+		local c = g.know.combat
+		if type(c) ~= "table" then
+			c = {}
+			g.know.combat = c
+		end
+		for _, k in ipairs({ "foes", "weapons", "reload" }) do
+			if type(c[k]) ~= "table" then
+				c[k] = {}
+			end
+		end
+		return c
+	end
+	local function trimTable(t, cap)
+		local n = 0
+		for _ in pairs(t) do
+			n = n + 1
+		end
+		if n <= cap then
+			return
+		end
+		local oldest, ok = nil, nil
+		for k, v in pairs(t) do
+			if not oldest or (v.t or 0) < oldest then
+				oldest, ok = v.t or 0, k
+			end
+		end
+		if ok then
+			t[ok] = nil
+		end
+	end
+	local function foeRec(name, create)
+		name = tostring(name or ""):lower()
+		if name == "" then
+			return nil
+		end
+		local k = kn()
+		local r = k.foes[name]
+		if not r and create then
+			r = { hp = 0, dmg = 0, secs = 0, hits = 0, maxhit = 0, beat = 0, lost = 0, ran = 0, t = os.time() }
+			k.foes[name] = r
+			trimTable(k.foes, 40)
+		end
+		return r
+	end
+	Combat.foe = foeRec
+	-- how much damage this enemy does per second while it is close (nil: not known yet)
+	function Combat.foeDps(name)
+		local r = foeRec(name)
+		if r and r.hits and r.hits >= 1 then
+			-- seconds it was close; before that is known, assume one hit about every 1.2 seconds
+			local secs = math.max(r.secs or 0, r.hits * 1.2)
+			return math.max(0.5, r.dmg / math.max(2, secs))
+		end
+		return nil
+	end
+	function Combat.foeHit(name)
+		local r = foeRec(name)
+		if r and r.hits and r.hits >= 1 then
+			return r.dmg / r.hits, r.maxhit
+		end
+		return nil
+	end
+	-- how much damage one swing of this weapon does to this kind of enemy (nil: no idea yet)
+	function Combat.weaponDmg(tool, foeName)
+		if not tool then
+			return nil
+		end
+		local k = kn()
+		local w = k.weapons[tool.Name:lower()]
+		if not w then
+			return nil
+		end
+		local e = foeName and w[tostring(foeName):lower()]
+		if type(e) == "table" and (e.n or 0) >= 2 then
+			return e.dmg / e.n, e.hits / e.n
+		end
+		local rec = Gear and Gear.recOf and Gear.recOf(tool)
+		if rec and (rec.n or 0) >= 3 then
+			return (rec.dmg or 0) / rec.n, (rec.hits or 0) / rec.n
+		end
+		return nil
+	end
+	-- after every swing at something (Body.attack tells it): which weapon, which enemy, how much it took off
+	function Combat.noteSwing(tool, foeName, dmg, foeMax)
+		if not (tool and foeName) then
+			return
+		end
+		foeName = tostring(foeName):lower()
+		local k = kn()
+		local wn = tool.Name:lower()
+		local w = k.weapons[wn]
+		if not w then
+			w = { t = os.time() }
+			k.weapons[wn] = w
+			trimTable(k.weapons, 24)
+		end
+		local e = w[foeName]
+		if type(e) ~= "table" then
+			e = { n = 0, hits = 0, dmg = 0 }
+			w[foeName] = e
+		end
+		e.n = e.n + 1
+		w.t = os.time()
+		if dmg and dmg > 0 then
+			e.hits = e.hits + 1
+			e.dmg = e.dmg + dmg
+		end
+		if foeMax and foeMax > 0 then
+			local r = foeRec(foeName, true)
+			if (r.hp or 0) < foeMax then
+				r.hp = foeMax
+			end
+		end
+		if e.n == 6 then
+			if e.hits == 0 then
+				say("nowork:" .. wn .. foeName, ("Learned: %s does nothing to %s"):format(tool.Name, foeName), 600)
+				pcall(World.lesson, ("%s does not hurt %s"):format(tool.Name, foeName))
+			else
+				say("works:" .. wn .. foeName, ("Learned: %s takes about %d health off %s per swing"):format(tool.Name, math.floor(e.dmg / e.n + 0.5), foeName), 600)
+			end
+		end
+	end
+
+	------------------------------------------------------------ taking damage: how hard each enemy hits
+	function Combat.onHit(drop, name, model, dist)
+		local now = os.clock()
+		Combat.hist[#Combat.hist + 1] = { t = now, d = drop, n = name and tostring(name):lower() or nil }
+		while #Combat.hist > 40 do
+			table.remove(Combat.hist, 1)
+		end
+		if not name then
+			return
+		end
+		local r = foeRec(name, true)
+		r.hits = r.hits + 1
+		r.dmg = r.dmg + drop
+		r.t = os.time()
+		if drop > (r.maxhit or 0) then
+			r.maxhit = drop
+		end
+		local th = model and model:FindFirstChildOfClass("Humanoid")
+		if th and th.MaxHealth > (r.hp or 0) then
+			r.hp = th.MaxHealth
+		end
+		Combat.lastHurt = { name = tostring(name):lower(), model = model, t = now, dist = dist or 0 }
+		if r.hits == 3 then
+			local per = r.dmg / r.hits
+			say("hit:" .. tostring(name), ("Learned: %s hits for about %d"):format(tostring(name), math.floor(per + 0.5)), 600)
+		end
+	end
+	-- seconds spent close to something hostile: with the damage taken it gives damage per second
+	local function engageClock()
+		while Alive do
+			task.wait(0.5)
+			if on() then
+				local _, root, hum = parts()
+				if root and hum and hum.Health > 0 then
+					for _, e in ipairs(Sense.npcs(16)) do
+						local r = foeRec(e.name, false)
+						if r then
+							r.secs = (r.secs or 0) + 0.5
+						end
+						local r2 = foeRec(e.name, false)
+						if e.maxhp and e.maxhp > 0 and r2 and (r2.hp or 0) < e.maxhp then
+							r2.hp = e.maxhp
+						end
+					end
+				end
+			end
+		end
+	end
+	task.spawn(engageClock)
+	-- damage taken in the last few seconds, per second
+	function Combat.incoming(window)
+		window = window or 4
+		local now, sum = os.clock(), 0
+		for _, h in ipairs(Combat.hist) do
+			if now - h.t <= window then
+				sum = sum + h.d
+			end
+		end
+		return sum / window
+	end
+
+	------------------------------------------------------------ the calculation
+	local function weaponReady()
+		local best = Gear and Gear.forFight and Gear.forFight({}) or nil
+		if best and Gear.isWeapon(best) then
+			local cls = Gear.recOf and Gear.recOf(best)
+			if not (cls and cls.dud) then
+				return best
+			end
+		end
+		return nil
+	end
+	Combat.weaponReady = weaponReady
+	-- who is about to fight me: everything hostile close by. returns the list with the numbers filled in
+	local function group(main, radius)
+		local list = {}
+		for _, e in ipairs(Sense.npcs(radius or 24)) do
+			local isMain = main and e.model == main
+			local dps = Combat.foeDps(e.name)
+			local hostile = isMain or dps ~= nil or Threat.classify(e) ~= nil or (Threat.hurtBy[e.name:lower()] or 0) >= 1
+			if hostile then
+				local r = foeRec(e.name)
+				local hp = (e.hp or 0)
+				if hp <= 0 and r then
+					hp = r.hp
+				end
+				if hp <= 0 then
+					hp = 100
+				end
+				list[#list + 1] = { e = e, name = e.name, hp = hp, maxhp = e.maxhp or hp, dist = e.dist, dps = dps or 8, known = dps ~= nil, hit = (Combat.foeHit(e.name)) }
+			end
+		end
+		return list
+	end
+	-- the verdict about a fight: { verdict = "fight" | "flee", why, ttk, ttd, n, hasWeapon, tool }
+	function Combat.assess(main)
+		Combat.stats.calcs = Combat.stats.calcs + 1
+		local _, root, hum = parts()
+		local out = { verdict = "flee", why = "no character", n = 0 }
+		if not (root and hum) then
+			return out
+		end
+		local myHp, myMax = hum.Health, math.max(1, hum.MaxHealth)
+		local frac = myHp / myMax
+		local grp = group(main, 24)
+		out.n = #grp
+		local tool = weaponReady()
+		out.tool = tool
+		out.hasWeapon = tool ~= nil
+		local mainName = main and main.Name or (grp[1] and grp[1].name) or nil
+		local totalHp, totalDps, anyKnown, farthest = 0, 0, false, 0
+		for _, g in ipairs(grp) do
+			totalHp = totalHp + g.hp
+			totalDps = totalDps + g.dps * (g.dist <= 30 and 1 or 0.5)
+			anyKnown = anyKnown or g.known
+			farthest = math.max(farthest, g.dist)
+		end
+		if #grp == 0 then
+			out.verdict, out.why = "ignore", "nothing hostile close"
+			return out
+		end
+		local per, rate
+		if tool then
+			per, rate = Combat.weaponDmg(tool, mainName)
+		end
+		if not per then
+			per = tool and ((Gear.cls and Gear.cls(tool) == "ranged") and 14 or 12) or 5 -- a fair guess until it has swung a few times
+		end
+		rate = rate or (tool and 0.85 or 0.8)
+		local mine = math.max(0.5, per * rate / SWING)
+		local walk = math.max(0, farthest - (tool and Gear.rangeOf and Gear.rangeOf(tool) or 6)) / 16
+		out.ttk = totalHp / mine + walk * 0.5
+		out.ttd = myHp / math.max(0.3, totalDps)
+		out.mine, out.theirs = r1(mine), r1(totalDps)
+		-- very close to death and it is known how hard they hit: do not gamble
+		local worstHit = 0
+		for _, g in ipairs(grp) do
+			local _, mh = Combat.foeHit(g.name)
+			worstHit = math.max(worstHit, mh or 0)
+		end
+		if not tool then
+			local weak = totalHp <= 30 and totalDps <= 3
+			if weak then
+				out.verdict, out.why = "fight", "it is weak, fists will do"
+			else
+				out.verdict, out.why = "flee", "I have no weapon"
+			end
+			return out
+		end
+		if frac < 0.2 and anyKnown then
+			out.verdict, out.why = "flee", ("health is %d%% and they hurt"):format(math.floor(frac * 100))
+		elseif anyKnown and worstHit > 0 and myHp <= worstHit * 1.6 then
+			out.verdict, out.why = "flee", "one more big hit could kill me"
+		elseif out.ttk * 1.35 <= out.ttd then
+			out.verdict, out.why = "fight", ("I win in %.0fs, they win in %.0fs"):format(out.ttk, out.ttd)
+		elseif #grp == 1 and frac > 0.8 and not anyKnown then
+			out.verdict, out.why = "fight", "do not know it yet, try"
+		else
+			out.verdict, out.why = "flee", ("%d of them, I would need %.0fs but last %.0fs"):format(#grp, out.ttk, out.ttd)
+		end
+		return out
+	end
+	-- Body.attack asks this on every round: keep going, or break off?
+	function Combat.shouldRetreat(hum, th, name)
+		if not on() then
+			return hum.MaxHealth > 0 and hum.Health / hum.MaxHealth < 0.3
+		end
+		local frac = hum.MaxHealth > 0 and hum.Health / hum.MaxHealth or 1
+		local dps = Combat.foeDps(name)
+		local _, mh = Combat.foeHit(name)
+		if frac < 0.1 then
+			return true, "health is almost gone"
+		end
+		if dps then
+			if frac < 0.2 then
+				return true, "low health and it hurts"
+			end
+			if mh and hum.Health <= mh * 1.5 then
+				return true, "one more big hit could kill me"
+			end
+			-- lose the race: it is not going down before I do
+			if th and th.Health > 0 then
+				local per = select(1, Combat.weaponDmg(weaponReady(), name)) or 10
+				local ttk = th.Health / math.max(0.5, per * 0.85 / SWING)
+				local ttd = hum.Health / math.max(0.3, dps)
+				if ttk > ttd * 1.4 and frac < 0.6 then
+					return true, ("it would take %.0fs to beat it and I last %.0fs"):format(ttk, ttd)
+				end
+			end
+			return false
+		end
+		return frac < 0.3, "my health is low"
+	end
+
+	------------------------------------------------------------ fighting back
+	-- the running-away code asks this: armed, and the maths say it wins -> no need to run from this one
+	local standCache = setmetatable({}, { __mode = "k" })
+	function Combat.mayStand(e)
+		if not on() or cfg.FightBack == false or not e or not e.model then
+			return false
+		end
+		local c = standCache[e.model]
+		local now = os.clock()
+		if c and now - c.t < 0.6 then
+			return c.ok
+		end
+		local ok = false
+		local _, _, hum = parts()
+		if hum and hum.MaxHealth > 0 and hum.Health / hum.MaxHealth >= 0.5 then
+			local v = Combat.assess(e.model)
+			ok = v.verdict == "fight" and v.hasWeapon == true
+		end
+		standCache[e.model] = { t = now, ok = ok }
+		return ok
+	end
+	function Combat.busy()
+		return Combat.running
+	end
+	function Combat.fight(model, why)
+		if Combat.running then
+			return
+		end
+		Combat.running = true
+		Combat.stats.fights = Combat.stats.fights + 1
+		local name = model and (model.Name or "it") or "it"
+		local ok, res, hits, swings = pcall(Body.attack, { model = model, disp = name }, { why = why or "it hit me", timeout = 28 })
+		Combat.running = false
+		if not ok then
+			return
+		end
+		local r = foeRec(name, true)
+		if res == "defeated" then
+			Combat.stats.wins = Combat.stats.wins + 1
+			r.beat = (r.beat or 0) + 1
+			say("won:" .. name, ("Learned: I can beat %s (%d swings)"):format(name, swings or 0), 120)
+		elseif res == "retreat" then
+			Combat.stats.retreats = Combat.stats.retreats + 1
+			r.ran = (r.ran or 0) + 1
+			local top = { name = name, dist = 12, why = "I was losing the fight" }
+			task.spawn(Body.flee, top)
+		elseif res == "dead" then
+			r.lost = (r.lost or 0) + 1
+		end
+		Games.save()
+		return res
+	end
+	-- Threat.onHit calls this when a creature hurt me. false = leave it to the normal running away
+	function Combat.react(model, name, dist, drop)
+		if not on() or cfg.FightBack == false then
+			return false
+		end
+		if Combat.running or Body.fleeing then
+			return Combat.running
+		end
+		local _, root, hum = parts()
+		if not (root and hum) or hum.Health <= 0 then
+			return false
+		end
+		for _, e in ipairs(Sense.npcs(40)) do
+			if e.model == model then
+				local rec = Games.matchThreat(e.set)
+				if rec and rec.src == "prompt" then
+					return false -- the owner's game file says to run from this one
+				end
+			end
+		end
+		local v = Combat.assess(model)
+		Combat.last = v
+		if v.verdict == "fight" and v.hasWeapon then
+			say("back:" .. tostring(name), ("Fighting back against %s: %s"):format(tostring(name), v.why), 25)
+			Combat.fightDeadline = os.clock() + 28
+			task.spawn(Combat.fight, model, "it hurt me and " .. v.why)
+			return true
+		elseif v.verdict == "fight" then
+			-- weak enough to fight with fists
+			task.spawn(Combat.fight, model, "it is weak")
+			return true
+		end
+		-- losing or unarmed: run, and when there is no weapon go looking for a free one
+		if not v.hasWeapon then
+			Combat.wantWeapon = { t = os.clock(), from = tostring(name) }
+			say("noweap", ("I have no weapon and %s hurts me: running, then I look for a free weapon"):format(tostring(name)), 60)
+		else
+			say("lose:" .. tostring(name), ("Running from %s: %s"):format(tostring(name), v.why), 40)
+		end
+		local top = { name = tostring(name), dist = dist or 10, why = v.hasWeapon and v.why or "I have no weapon", model = model, pos = model and model.PrimaryPart and model.PrimaryPart.Position }
+		local mr = model and (model:FindFirstChild("HumanoidRootPart") or model:FindFirstChildWhichIsA("BasePart"))
+		if mr then
+			top.pos = mr.Position
+		end
+		top.level = 2
+		task.spawn(Body.flee, top)
+		return true
+	end
+
+	------------------------------------------------------------ guns: reload
+	local function ammoOf(tool)
+		local v
+		pcall(function()
+			for _, a in ipairs({ "Ammo", "Clip", "Mag", "Bullets", "Arrows", "CurrentAmmo", "ammo" }) do
+				local x = tool:GetAttribute(a)
+				if type(x) == "number" then
+					v = x
+					return
+				end
+				local c = tool:FindFirstChild(a, true)
+				if c and (c:IsA("IntValue") or c:IsA("NumberValue")) then
+					v = c.Value
+					return
+				end
+			end
+		end)
+		return v
+	end
+	Combat.ammoOf = ammoOf
+	-- a "press R to reload" hint on the screen: the letter it names
+	local function reloadHint()
+		local pg = lp:FindFirstChildOfClass("PlayerGui")
+		if not pg then
+			return nil, nil
+		end
+		local key, btn
+		pcall(function()
+			for _, d in ipairs(pg:GetDescendants()) do
+				if (d:IsA("TextLabel") or d:IsA("TextButton")) and not World.isOwn(d) and d.Visible ~= false then
+					local t = tostring(d.Text or ""):lower()
+					if t:find("reload", 1, true) then
+						local k = t:match("press%s+%[?(%a)%]?%s+to%s+reload") or t:match("%[(%a)%]%s*reload") or t:match("reload%s*%[(%a)%]") or t:match("%((%a)%)%s*reload") or t:match("reload%s*%((%a)%)")
+						if k and #k == 1 then
+							key = k:upper()
+						end
+						if d:IsA("GuiButton") then
+							btn = d
+						end
+					end
+				end
+			end
+		end)
+		return key, btn
+	end
+	local function pressKey(k)
+		local ok, res = pcall(M.act, { ["do"] = "key", key = k }, { auto = true })
+		return ok and res
+	end
+	local function clickGui(obj)
+		local sz, ps = obj.AbsoluteSize, obj.AbsolutePosition
+		local ok = pcall(function()
+			if M.quickTap then
+				M.quickTap(ps.X + sz.X / 2, ps.Y + sz.Y / 2 + (World.insetY and World.insetY() or 0))
+			end
+		end)
+		return ok
+	end
+	-- is the magazine empty (or is the game telling it to reload)?
+	function Combat.needsReload(tool)
+		if not tool then
+			return false
+		end
+		local a = ammoOf(tool)
+		if a ~= nil and a <= 0 then
+			return true
+		end
+		local key = reloadHint()
+		return key ~= nil and a == nil and false or (a ~= nil and a <= 0)
+	end
+	-- reload once, the way that works. returns true when it tried something
+	function Combat.reload(tool)
+		tool = tool or (lp.Character and lp.Character:FindFirstChildOfClass("Tool"))
+		if not tool then
+			return false
+		end
+		local now = os.clock()
+		if Combat.lastReload and now - Combat.lastReload < 2.2 then
+			return false
+		end
+		local k = kn()
+		local rec = k.reload[tool.Name:lower()]
+		if rec == "never" then
+			return false
+		end
+		Combat.lastReload = now
+		local before = ammoOf(tool)
+		local how
+		local hintKey, hintBtn = reloadHint()
+		local function attempt(h)
+			if h == "button" then
+				local b = hintBtn
+				if not b then
+					for _, g in ipairs(World.guiButtons(40)) do
+						if (tostring(g.text) .. " " .. g.obj.Name):lower():find("reload", 1, true) then
+							b = g.obj
+							break
+						end
+					end
+				end
+				if b then
+					return clickGui(b)
+				end
+				return false
+			elseif h == "hint" then
+				if hintKey then
+					return pressKey(hintKey) and true
+				end
+				return false
+			else
+				return pressKey("R") and true
+			end
+		end
+		local order = { "button", "hint", "key" }
+		if type(rec) == "string" and rec ~= "never" then
+			table.insert(order, 1, rec) -- what worked last time goes first
+		end
+		for _, h in ipairs(order) do
+			if attempt(h) then
+				how = h
+				task.wait(0.9)
+				local after = ammoOf(tool)
+				if before == nil or after == nil or after > (before or 0) then
+					break
+				end
+				how = nil
+			end
+		end
+		Combat.stats.reloads = Combat.stats.reloads + 1
+		if how then
+			if k.reload[tool.Name:lower()] ~= how then
+				k.reload[tool.Name:lower()] = how
+				Games.save()
+				say("reload:" .. tool.Name, ("Learned: %s reloads with %s"):format(tool.Name, how == "key" and "the R key" or (how == "hint" and ("the " .. tostring(hintKey) .. " key") or "its Reload button")), 600)
+				pcall(World.lesson, ("%s is reloaded with %s"):format(tool.Name, how))
+			end
+			return true
+		end
+		Combat.failedReloads = (Combat.failedReloads or 0) + 1
+		if Combat.failedReloads >= 4 and before ~= nil then
+			k.reload[tool.Name:lower()] = "never"
+			say("noreload:" .. tool.Name, ("Learned: I cannot reload %s, so I use something else"):format(tool.Name), 600)
+		end
+		return false
+	end
+
+	------------------------------------------------------------ a weapon that is lying around for free
+	local PAID = { "robux", "buy", "purchase", "premium", "vip", "gamepass", "game pass", "pass", "shop", "store", "price", "cost", "unlock", "locked", "donate", "r$", "owned", "requires", "level" }
+	local function paidText(s)
+		s = tostring(s or ""):lower()
+		if M.riskyText and M.riskyText(s) then
+			return true
+		end
+		for _, w in ipairs(PAID) do
+			if s:find(w, 1, true) then
+				return true
+			end
+		end
+		return false
+	end
+	local function blocked(key)
+		return Brain.Ledger and Brain.Ledger.isBlocked and Brain.Ledger.isBlocked(key)
+	end
+	-- weapons on the ground / on a pedestal that cost nothing: { pos, name, tool, prompt }
+	function Combat.weaponsAround(radius)
+		local out = {}
+		local _, root = parts()
+		if not root then
+			return out
+		end
+		local seen = {}
+		local function consider(obj, handle)
+			if not handle or not handle:IsA("BasePart") or seen[obj] then
+				return
+			end
+			seen[obj] = true
+			local d = flat(handle.Position, root.Position)
+			if d > (radius or 250) then
+				return
+			end
+			local name = obj.Name
+			local key = "weapon:" .. name:lower()
+			if blocked(key) then
+				return
+			end
+			-- anything that says it costs something is left alone
+			local bad = paidText(name)
+			local prompt
+			pcall(function()
+				for _, x in ipairs(obj:GetDescendants()) do
+					if x:IsA("ProximityPrompt") then
+						prompt = x
+						if paidText(x.ActionText) or paidText(x.ObjectText) then
+							bad = true
+						end
+					elseif x:IsA("ClickDetector") then
+						prompt = prompt or x
+					end
+					if (x:IsA("IntValue") or x:IsA("NumberValue")) and (paidText(x.Name)) and x.Value > 0 then
+						bad = true
+					end
+				end
+				for _, a in ipairs({ "Price", "Cost", "Robux", "GamePassId", "ProductId" }) do
+					if obj:GetAttribute(a) ~= nil then
+						bad = true
+					end
+				end
+				local par = obj.Parent
+				for _ = 1, 3 do
+					if par and par ~= workspace and paidText(par.Name) then
+						bad = true
+					end
+					par = par and par.Parent
+				end
+			end)
+			if not bad then
+				out[#out + 1] = { pos = handle.Position, name = name, obj = obj, prompt = prompt, dist = d, key = key }
+			end
+		end
+		pcall(function()
+			for _, d in ipairs(workspace:GetDescendants()) do
+				if d:IsA("Tool") and d.Parent and not d:IsDescendantOf(lp.Character or workspace) then
+					local owner = d.Parent and (d.Parent:FindFirstChildOfClass("Humanoid") ~= nil or d.Parent:IsA("Backpack"))
+					if not owner and (Gear.isWeapon(d)) then
+						consider(d, d:FindFirstChild("Handle") or d:FindFirstChildWhichIsA("BasePart"))
+					end
+				end
+			end
+		end)
+		table.sort(out, function(a, b)
+			return a.dist < b.dist
+		end)
+		return out
+	end
+	-- standing at the weapon: pick it up (walking over it, or its Take prompt). true when it is in the inventory
+	local function pickUp(w)
+		task.wait(0.4)
+		if w.prompt and not weaponReady() and w.obj.Parent then
+			pcall(function()
+				if w.prompt:IsA("ProximityPrompt") and fireproximityprompt then
+					fireproximityprompt(w.prompt)
+				elseif w.prompt:IsA("ClickDetector") and fireclickdetector then
+					fireclickdetector(w.prompt)
+				end
+			end)
+			task.wait(0.6)
+		end
+		local got = weaponReady() ~= nil or (lp.Backpack and lp.Backpack:FindFirstChild(w.name) ~= nil) or (lp.Character and lp.Character:FindFirstChild(w.name) ~= nil)
+		if got then
+			say("gotw:" .. w.name, ("Learned: %s is free, now I can fight"):format(w.name), 120)
+			pcall(World.lesson, ("%s can be picked up for free"):format(w.name))
+			Combat.wantWeapon = nil
+			-- hold it right away
+			pcall(function()
+				local t = (lp.Backpack and lp.Backpack:FindFirstChild(w.name))
+				if t then
+					Gear.equip(t, "to fight", true)
+				end
+			end)
+		elseif Brain.Ledger and Brain.Ledger.block then
+			-- touched it and nothing happened: it is not a free pick-up, never again
+			Brain.Ledger.block(w.key, "walking to it and using it gave nothing")
+		end
+		return got
+	end
+	-- being chased with no weapon and one is lying around: run TOWARD it instead of away (a chaser as fast as me never gets shaken off)
+	function Combat.fleeToWeapon(top)
+		if not (on() and top and top.model) or Body.fleeing or not Legs.can() or weaponReady() then
+			return false
+		end
+		local _, root = parts()
+		if not root then
+			return false
+		end
+		local tp = top.pos
+		local mr = top.model:FindFirstChild("HumanoidRootPart") or top.model:FindFirstChildWhichIsA("BasePart")
+		tp = mr and mr.Position or tp
+		local pick
+		for _, w in ipairs(Combat.weaponsAround(140)) do
+			-- not through the enemy: the weapon must be away from it or clearly nearer to me than to it
+			local toW = Vector3.new(w.pos.X - root.Position.X, 0, w.pos.Z - root.Position.Z)
+			local toT = tp and Vector3.new(tp.X - root.Position.X, 0, tp.Z - root.Position.Z) or Vector3.new(0, 0, 0)
+			local dot = (toW.Magnitude > 0.1 and toT.Magnitude > 0.1) and toW.Unit:Dot(toT.Unit) or 0
+			if dot < 0.45 or (tp and flat(w.pos, tp) > toW.Magnitude + 6) then
+				pick = w
+				break
+			end
+		end
+		if not pick then
+			return false
+		end
+		Combat.stats.finds = Combat.stats.finds + 1
+		Body.fleeing = true
+		Body.newToken()
+		Body.now = "running to " .. pick.name
+		Body.reason(("Running from %s straight to the free weapon %s"):format(tostring(top.name), pick.name))
+		say("seek:" .. pick.name, ("Running to the free weapon %s because %s is after me and I have no weapon"):format(pick.name, tostring(top.name)), 20)
+		if Body.noteFlee then
+			pcall(Body.noteFlee, top)
+		end
+		Body.stats.fled = Body.stats.fled + 1
+		local ok, res = pcall(Body.goto, pick.pos, { label = pick.name, why = "I need a weapon", within = 2.5, timeout = 18, avoid = false })
+		local got = false
+		if ok and res == "arrived" then
+			got = pickUp(pick)
+		end
+		Body.fleeing = false
+		Body.now = ""
+		if got then
+			Threat.refresh()
+			return true
+		end
+		return false -- the plain way of running takes over
+	end
+	-- go and get one. returns "got", "none", "failed" or "interrupted"
+	function Combat.findWeapon(o)
+		o = o or {}
+		if not Legs.can() then
+			return "failed", "walking is switched off"
+		end
+		if weaponReady() and not o.force then
+			return "got", "I already have one"
+		end
+		local list = Combat.weaponsAround(o.radius or 300)
+		if #list == 0 then
+			return "none", "no free weapon around"
+		end
+		Combat.stats.finds = Combat.stats.finds + 1
+		for i = 1, math.min(3, #list) do
+			local w = list[i]
+			say("seek:" .. w.name, ("Going for the free weapon %s"):format(w.name), 30)
+			local res = Body.goto(w.pos, { label = w.name, why = "I need a weapon", within = 2.5, timeout = 20, item = { pos = w.pos, name = w.name } })
+			if res == "arrived" then
+				if pickUp(w) then
+					return "got", w.name
+				end
+			elseif res == "interrupted" or res == "threat" or res == "dead" or res == "legsoff" then
+				if not weaponReady() then
+					Combat.wantWeapon = { t = os.clock(), from = "interrupted" } -- try again once things calm down
+				end
+				return "interrupted", res
+			end
+		end
+		return "failed", "I could not pick one up"
+	end
+
+	------------------------------------------------------------ watching the fight: reload mid-fight, look for a weapon when running out of ideas
+	local function watcher()
+		while Alive do
+			task.wait(0.6)
+			if on() then
+				local char, root, hum = parts()
+				if char and hum and hum.Health > 0 then
+					-- something hostile is coming and the maths say it can be beaten: meet it instead of waiting to be hit
+					if cfg.FightBack ~= false and not Combat.running and not Body.fleeing and Threat.enabled() and Legs.can() then
+						for _, e in ipairs(Sense.npcs(14)) do
+							if (e.closing > 1 or e.dist < 7) and (Threat.classify(e) ~= nil or Combat.foeDps(e.name) ~= nil) and Combat.mayStand(e) then
+								local rec = Games.matchThreat(e.set)
+								if not (rec and rec.src == "prompt") then
+									local wt = Combat.weaponReady()
+									say("meet:" .. e.name, ("Meeting %s with %s"):format(e.disp, wt and wt.Name or "my weapon"), 25)
+									task.spawn(Combat.fight, e.model, "it is coming and I can win")
+									break
+								end
+							end
+						end
+					end
+					local tool = char:FindFirstChildOfClass("Tool")
+					if tool and (Combat.running or Body.target) then
+						local a = ammoOf(tool)
+						if a ~= nil and a <= 0 then
+							pcall(Combat.reload, tool)
+						end
+					end
+				end
+			end
+		end
+	end
+	task.spawn(watcher)
+	local prevFleeDone = Body.onFleeDone
+	Body.onFleeDone = function(top)
+		if prevFleeDone then
+			pcall(prevFleeDone, top)
+		end
+		if top and top.model and on() and not Combat.wantWeapon and not weaponReady() then
+			Combat.wantWeapon = { t = os.clock(), from = tostring(top.name) }
+			say("noweap", ("I have no weapon and ran from %s: now I look for a free weapon"):format(tostring(top.name)), 60)
+		end
+		pcall(Combat.afterFlee)
+	end
+	-- after running: no weapon and it got hurt by something -> look for a free one (once per scare)
+	function Combat.afterFlee()
+		local w = Combat.wantWeapon
+		if not (w and on()) or os.clock() - w.t > 90 then
+			return
+		end
+		Combat.wantWeapon = nil
+		if weaponReady() or Body.fleeing or not Legs.can() then
+			return
+		end
+		task.spawn(function()
+			local res, why = Combat.findWeapon({})
+			if res == "none" then
+				say("noweapfree", "No free weapon around: I keep away from enemies", 90)
+			end
+		end)
+	end
+
+	------------------------------------------------------------ for the planner and the UI
+	function Combat.text()
+		local L = {}
+		local k = kn()
+		local names = {}
+		for n, r in pairs(k.foes) do
+			if (r.hits or 0) > 0 or (r.beat or 0) > 0 or (r.lost or 0) > 0 then
+				names[#names + 1] = n
+			end
+		end
+		table.sort(names)
+		for i = 1, math.min(6, #names) do
+			local n = names[i]
+			local r = k.foes[n]
+			local dps, mh = Combat.foeDps(n), nil
+			L[#L + 1] = ("%s: ~%d health%s%s%s"):format(n, math.floor((r.hp or 0) + 0.5), dps and (", hurts " .. r1(dps) .. "/s") or "", (r.beat or 0) > 0 and (", beaten " .. r.beat .. "x") or "", (r.lost or 0) > 0 and (", killed me " .. r.lost .. "x") or "")
+		end
+		local out = {}
+		if #L > 0 then
+			out[#out + 1] = "Enemies you know: " .. table.concat(L, "; ")
+		end
+		local tool = weaponReady()
+		out[#out + 1] = tool and ("Weapon in use: " .. tool.Name) or "You have NO weapon: run from enemies; free weapons lying around can be fetched with goal getweapon"
+		return table.concat(out, "\n")
+	end
+	function Combat.summary()
+		local k = kn()
+		local n = 0
+		for _ in pairs(k.foes) do
+			n = n + 1
+		end
+		return ("%d enemies known, %d fights (%d won), %d reloads"):format(n, Combat.stats.fights, Combat.stats.wins, Combat.stats.reloads)
+	end
+end)()
+------------------------------------------------------------------ orders: what the owner tells it to do comes before its own plans
+-- "go inside the house", "parkour", "kill the zombies", "collect coins", "stay here", "continue" ...
+-- Understood locally (instant, works without any AI key) and carried out by the body; anything else the owner says stays a note for the planner.
+;(function()
+	local Orders = { list = {}, nextId = 1, stats = { given = 0, done = 0, failed = 0 } }
+	Brain.Orders = Orders
+	local Games, Body, Threat, Sense = Brain.Games, Brain.Body, Brain.Threat, Brain.Sense
+	local Legs = Core.Legs
+	local M = World.mouse
+
+	local function parts()
+		local c = lp.Character
+		return c, c and c:FindFirstChild("HumanoidRootPart"), c and c:FindFirstChildOfClass("Humanoid")
+	end
+	local function flat(a, b)
+		return math.sqrt((a.X - b.X) ^ 2 + (a.Z - b.Z) ^ 2)
+	end
+	local function say(msg)
+		if Brain.Pilot and Brain.Pilot.say then
+			Brain.Pilot.say(msg)
+		end
+	end
+	local function on()
+		return cfg.Orders ~= false
+	end
+
+	------------------------------------------------------------ reading what the owner wrote
+	local FILLER = {}
+	for w in ([[the a an to into inside in of at for please now just some all any your my me up out on and with that this there here towards toward onto then it its them those these go]]):gmatch("%a+") do
+		FILLER[w] = true
+	end
+	local function wordsOf(s)
+		local out = {}
+		for w in tostring(s or ""):lower():gmatch("[%w']+") do
+			out[#out + 1] = w
+		end
+		return out
+	end
+	local function content(list)
+		local out = {}
+		for _, w in ipairs(list) do
+			if not FILLER[w] then
+				out[#out + 1] = w
+			end
+		end
+		return out
+	end
+	local function startsWith(s, p)
+		return s:sub(1, #p) == p
+	end
+	local function anyStart(s, list)
+		for _, p in ipairs(list) do
+			if s == p or startsWith(s, p .. " ") then
+				return p
+			end
+		end
+		return nil
+	end
+	local function anyIn(s, list)
+		for _, p in ipairs(list) do
+			if (" " .. s .. " "):find(" " .. p .. " ", 1, true) then
+				return p
+			end
+		end
+		return nil
+	end
+	local function seconds(s)
+		local n, unit = s:match("(%d+)%s*([%a]+)")
+		n = tonumber(n)
+		if not n then
+			return nil
+		end
+		unit = unit or ""
+		if unit:sub(1, 3) == "min" or unit == "m" then
+			return math.min(n * 60, 900)
+		end
+		return math.min(n, 900)
+	end
+	local WEAPON_WORDS = { "weapon", "weapons", "sword", "gun", "bow", "knife", "blade", "club", "axe", "rifle", "pistol", "spear", "staff", "wand", "bat" }
+	local BUILDING = { "house", "home", "building", "hut", "cabin", "cottage", "mansion", "villa", "shack", "shop", "store", "castle", "tower", "shed", "garage", "barn", "hall", "church", "school", "hospital", "hotel", "bunker", "base", "room", "tent", "temple", "lab", "office" }
+
+	-- one sentence -> one order (or nil: it is not an order)
+	local function parseOne(raw)
+		local original = tostring(raw or "")
+		local low = " " .. table.concat(wordsOf(original), " ") .. " "
+		local s = low:sub(2, -2)
+		if s == "" then
+			return nil
+		end
+		local ws = wordsOf(s)
+		local first = ws[1]
+		-- back to its own free will
+		if anyStart(s, { "free will", "be free", "you decide", "never mind", "nevermind", "forget it", "cancel", "continue", "resume", "carry on", "go on", "play normally", "back to normal", "do what you want", "do whatever", "do whatever you want", "you are free", "stand down" }) or s == "ok" or s == "okay" then
+			return { kind = "free" }
+		end
+		if anyStart(s, { "stop", "stay", "wait", "freeze", "stand still", "hold on", "hold still", "pause", "dont move", "don't move", "do not move", "sit", "halt" }) then
+			return { kind = "stay", secs = seconds(s) }
+		end
+		if anyIn(s, { "parkour", "obby", "obstacle course", "obstacle", "speedrun" }) or s:find("to the top", 1, true) or s:find("reach the top", 1, true) or s:find("finish the", 1, true) or s:find("beat the", 1, true) and (s:find("course", 1, true) or s:find("stage", 1, true) or s:find("level", 1, true)) or s:find("climb", 1, true) and (s:find("tower", 1, true) or s:find("mountain", 1, true) or s:find("top", 1, true)) then
+			return { kind = "parkour" }
+		end
+		if anyStart(s, { "run away", "flee", "hide", "escape", "run from", "get away" }) then
+			return { kind = "flee" }
+		end
+		if anyStart(s, { "get", "find", "grab", "take", "pick up", "look for", "search for", "go find", "go get", "go grab" }) then
+			local rest = s
+			for _, w in ipairs(WEAPON_WORDS) do
+				if (" " .. rest .. " "):find(" " .. w .. " ", 1, true) then
+					return { kind = "getweapon", q = w }
+				end
+			end
+		end
+		if s:find("button", 1, true) and anyStart(s, { "click", "press", "tap", "push", "hit" }) then
+			local clk0 = anyStart(s, { "click", "press", "tap", "push", "hit" })
+			return { kind = "click", q = table.concat(content(wordsOf((s:sub(#clk0 + 1):gsub("button", "")))), " ") }
+		end
+		local atk = anyStart(s, { "kill", "attack", "fight", "hit", "destroy", "defeat", "slay", "punch", "shoot", "beat up", "beat", "clear" })
+		if atk then
+			local q = content(wordsOf(s:sub(#atk + 1)))
+			return { kind = "attack", q = table.concat(q, " ") }
+		end
+		-- get in / go in / enter: walking somewhere
+		local gv = anyStart(s, { "go", "walk", "run", "move", "head", "come", "travel", "enter", "get", "step", "teleport", "take me", "bring me" })
+		local gotoLike = gv and (gv ~= "get" or anyIn(s, { "in", "inside", "into", "to", "onto", "on", "near", "closer" }))
+		if gotoLike then
+			local inside = (gv == "enter") or anyIn(s, { "inside", "into", "in" }) ~= nil
+			local rest = s:sub(#gv + 1)
+			local q = content(wordsOf(rest))
+			local qs = table.concat(q, " ")
+			if gv == "go" and (qs == "away" or qs == "back") then
+				return nil
+			end
+			return { kind = "goto", q = qs, inside = inside }
+		end
+		local fol = anyStart(s, { "follow" })
+		if fol then
+			return { kind = "follow", q = table.concat(content(wordsOf(s:sub(#fol + 1))), " "), secs = seconds(s) or 60 }
+		end
+		local col = anyStart(s, { "collect", "gather", "pick up", "grab", "loot", "farm", "mine", "get", "take", "pickup" })
+		if col then
+			return { kind = "collect", q = table.concat(content(wordsOf(s:sub(#col + 1))), " ") }
+		end
+		local clk = anyStart(s, { "click", "press", "tap", "push", "hit" })
+		if clk then
+			return { kind = "click", q = table.concat(content(wordsOf(s:sub(#clk + 1))), " ") }
+		end
+		local eq = anyStart(s, { "equip", "hold", "wield", "take out", "switch to", "use", "cast", "activate" })
+		if eq then
+			return { kind = "use", q = table.concat(content(wordsOf(s:sub(#eq + 1))), " ") }
+		end
+		if first == "say" or first == "type" or first == "tell" then
+			local msg = original:match("^%s*%a+%s+(.+)$")
+			return { kind = "say", text = msg and msg:gsub("^[\"']", ""):gsub("[\"']$", "") or "" }
+		end
+		if first == "jump" then
+			return { kind = "jump" }
+		end
+		if first == "buy" or first == "purchase" then
+			return { kind = "text", q = original, topic = "buy" }
+		end
+		if first == "build" or first == "make" or first == "place" or first == "craft" then
+			return { kind = "text", q = original, topic = "build" }
+		end
+		-- sounds like a command, but not one it understands by itself: the planner gets it as an order to carry out with its own steps
+		if startsWith(s, "order") or startsWith(s, "you must") or startsWith(s, "you need to") or startsWith(s, "you have to") or startsWith(s, "do ") or original:find("!%s*$") then
+			return { kind = "text", q = original }
+		end
+		return nil
+	end
+
+	function Orders.parse(text)
+		local t = tostring(text or "")
+		t = t:gsub("%s+and%s+then%s+", "|"):gsub("%s+then%s+", "|"):gsub(",%s*then%s+", "|"):gsub("[;%.!?\n]+", "|")
+		local out = {}
+		for piece in t:gmatch("[^|]+") do
+			local o = parseOne(piece)
+			if o then
+				o.text = o.text or piece:gsub("^%s+", ""):gsub("%s+$", "")
+				o.src = piece:gsub("^%s+", ""):gsub("%s+$", "")
+				out[#out + 1] = o
+			end
+		end
+		return out
+	end
+
+	------------------------------------------------------------ finding what the owner points at
+	local function isCharacterModel(inst)
+		if not inst:IsA("Model") then
+			return false
+		end
+		return inst:FindFirstChildOfClass("Humanoid") ~= nil
+	end
+	local function boundsOf(inst)
+		local lo, hi
+		local function add(p)
+			local h = p.Size / 2
+			local a, b = p.Position - h, p.Position + h
+			if not lo then
+				lo, hi = a, b
+			else
+				lo = Vector3.new(math.min(lo.X, a.X), math.min(lo.Y, a.Y), math.min(lo.Z, a.Z))
+				hi = Vector3.new(math.max(hi.X, b.X), math.max(hi.Y, b.Y), math.max(hi.Z, b.Z))
+			end
+		end
+		if inst:IsA("BasePart") then
+			add(inst)
+		else
+			local n = 0
+			for _, d in ipairs(inst:GetDescendants()) do
+				if d:IsA("BasePart") then
+					add(d)
+					n = n + 1
+					if n >= 500 then
+						break
+					end
+				end
+			end
+		end
+		return lo, hi
+	end
+	local function matchWords(inst, qwords, group)
+		local set = Games.tokenize(inst.Name)
+		local par = inst.Parent
+		if par and par ~= workspace and par:IsA("Model") then
+			for k in pairs((Games.tokenize(par.Name))) do
+				set[k] = set[k] or false -- the parent's name helps a little (a door of the red house)
+			end
+		end
+		local hits = 0
+		for _, w in ipairs(qwords) do
+			local f = Games.tokenize(w)
+			local ok = false
+			for k in pairs(f) do
+				if set[k] then
+					ok = true
+				end
+			end
+			if ok then
+				hits = hits + 1
+			end
+		end
+		if hits == #qwords and #qwords > 0 then
+			return 2
+		end
+		if group then
+			for _, w in ipairs(group) do
+				if set[w] then
+					return 1
+				end
+			end
+		end
+		return 0
+	end
+	-- things in the world with a name that fits what the owner said, the best first
+	function Orders.findNamed(q)
+		local qwords = content(wordsOf(q))
+		local _, root = parts()
+		if not root then
+			return {}
+		end
+		local group
+		for _, w in ipairs(qwords) do
+			for _, b in ipairs(BUILDING) do
+				if w == b then
+					group = BUILDING
+				end
+			end
+		end
+		local out, got, n = {}, {}, 0
+		for _, d in ipairs(workspace:GetDescendants()) do
+			n = n + 1
+			if n > 9000 then
+				break
+			end
+			if (d:IsA("Model") or d:IsA("BasePart")) and d.Name ~= "Baseplate" and d.Name ~= "Terrain" and not World.isOwn(d) then
+				local anc = d.Parent
+				local skip = false
+				while anc and anc ~= workspace do
+					if got[anc] then
+						skip = true
+						break
+					end
+					anc = anc.Parent
+				end
+				if not skip then
+					local sc = (#qwords > 0 or group) and matchWords(d, qwords, group) or 0
+					if sc > 0 then
+						got[d] = true
+						local lo, hi = boundsOf(d)
+						if lo then
+							local c = (lo + hi) / 2
+							out[#out + 1] = { obj = d, name = d.Name, lo = lo, hi = hi, center = c, size = hi - lo, score = sc + (d:IsA("Model") and 0.5 or 0), isChar = isCharacterModel(d), dist = flat(c, root.Position) }
+						end
+					end
+				end
+			end
+		end
+		table.sort(out, function(a, b)
+			if a.score ~= b.score then
+				return a.score > b.score
+			end
+			return a.dist < b.dist
+		end)
+		return out
+	end
+	local function playerNamed(q)
+		local want = tostring(q or ""):lower():gsub("%s+", "")
+		if want == "" then
+			return nil
+		end
+		for _, p in ipairs(Players:GetPlayers()) do
+			if p ~= lp then
+				local a, b = p.Name:lower(), (p.DisplayName or ""):lower()
+				if a:find(want, 1, true) or b:find(want, 1, true) then
+					return p
+				end
+			end
+		end
+		return nil
+	end
+	-- standable points inside a building (its floor), best first
+	local function interiorPoints(thing)
+		local _, root = parts()
+		local rp = RaycastParams.new()
+		rp.FilterType = Enum.RaycastFilterType.Exclude
+		rp.FilterDescendantsInstances = { lp.Character }
+		pcall(function()
+			rp.RespectCanCollide = true
+		end)
+		local lo, hi, c = thing.lo, thing.hi, thing.center
+		local sx, sz = hi.X - lo.X, hi.Z - lo.Z
+		local offs = { { 0, 0 }, { 0.25, 0 }, { -0.25, 0 }, { 0, 0.25 }, { 0, -0.25 }, { 0.25, 0.25 }, { -0.25, -0.25 }, { 0.25, -0.25 }, { -0.25, 0.25 }, { 0.38, 0 }, { -0.38, 0 }, { 0, 0.38 }, { 0, -0.38 } }
+		local out = {}
+		local midY = lo.Y + (hi.Y - lo.Y) * 0.45
+		for _, o in ipairs(offs) do
+			local x, z = c.X + o[1] * sx, c.Z + o[2] * sz
+			local ok, hit = pcall(function()
+				return workspace:Raycast(Vector3.new(x, midY, z), Vector3.new(0, -(midY - lo.Y + 6), 0), rp)
+			end)
+			if ok and hit then
+				out[#out + 1] = Vector3.new(x, hit.Position.Y + 3, z)
+			end
+		end
+		return out
+	end
+	-- where to walk for an order of the "go" kind: { { pos, label, within } ... }
+	local function resolveGoto(o)
+		local cands = {}
+		local _, root = parts()
+		if not root then
+			return cands
+		end
+		local q = o.q
+		if q == "" and o.inside then
+			q = "house"
+		end
+		local p = (q ~= "") and playerNamed(q)
+		if p and p.Character and p.Character:FindFirstChild("HumanoidRootPart") then
+			cands[#cands + 1] = { pos = p.Character.HumanoidRootPart.Position, label = p.DisplayName or p.Name, within = 5 }
+			return cands
+		end
+		-- places it already knows from playing
+		local g = Games.cur(false)
+		if g and q ~= "" then
+			for _, pl in ipairs(g.know.places or {}) do
+				if pl.n:lower():find(q, 1, true) or q:find(pl.n:lower(), 1, true) then
+					cands[#cands + 1] = { pos = Vector3.new(pl.x, root.Position.Y, pl.z), label = pl.n, within = 4 }
+				end
+			end
+		end
+		for i, thing in ipairs(Orders.findNamed(q)) do
+			if i > 4 then
+				break
+			end
+			if thing.isChar then
+				local r = thing.obj:FindFirstChild("HumanoidRootPart") or thing.obj.PrimaryPart
+				cands[#cands + 1] = { pos = r and r.Position or thing.center, label = thing.name, within = 5, thing = thing, live = thing.obj }
+			elseif o.inside and thing.obj:IsA("Model") and thing.size.X > 8 and thing.size.Z > 8 then
+				local pts = interiorPoints(thing)
+				local ranked = {}
+				for _, pt in ipairs(pts) do
+					local v = Brain.Vision and Brain.Vision.check(pt, { within = 3 }) or { ok = nil }
+					ranked[#ranked + 1] = { pt = pt, r = v.ok == true and 0 or (v.ok == nil and 1 or 2), why = v.why }
+				end
+				table.sort(ranked, function(a, b)
+					return a.r < b.r
+				end)
+				for _, r in ipairs(ranked) do
+					if r.r < 2 then
+						cands[#cands + 1] = { pos = r.pt, label = "inside " .. thing.name, within = 3, thing = thing, inside = true }
+					end
+				end
+				if #ranked > 0 and ranked[1].r == 2 then
+					o.why = ranked[1].why
+				end
+			elseif thing.size.X > 9 and thing.size.Z > 9 then
+				-- a big thing (a building): the ground just outside each of its four sides, nearest first
+				local sides = { { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 } }
+				local pts = {}
+				for _, sd in ipairs(sides) do
+					local x = thing.center.X + sd[1] * (thing.size.X / 2 + 4)
+					local z = thing.center.Z + sd[2] * (thing.size.Z / 2 + 4)
+					pts[#pts + 1] = { pos = Vector3.new(x, root.Position.Y, z), d = flat(Vector3.new(x, 0, z), root.Position) }
+				end
+				table.sort(pts, function(a, b)
+					return a.d < b.d
+				end)
+				for _, pt in ipairs(pts) do
+					cands[#cands + 1] = { pos = pt.pos, label = thing.name, within = 4, thing = thing }
+				end
+			else
+				cands[#cands + 1] = { pos = Vector3.new(thing.center.X, thing.center.Y + 1, thing.center.Z), label = thing.name, within = 4, thing = thing }
+			end
+		end
+		return cands
+	end
+
+	------------------------------------------------------------ carrying orders out. Each runner does one slice and says "done", "wait" (more to do) or "fail"
+	local RUN = {}
+
+	function RUN.stay(o)
+		o.started = o.started or os.clock()
+		if not o.halted then
+			o.halted = true
+			pcall(Body.stop)
+		end
+		if Brain.Pilot then
+			Brain.Pilot.stayUntil = os.clock() + 1.5
+		end
+		if o.secs and os.clock() - o.started >= o.secs then
+			return "done", "stayed where I was"
+		end
+		task.wait(0.4)
+		return "wait"
+	end
+
+	function RUN.free(o)
+		return "done", "back to my own free will"
+	end
+
+	function RUN.goto(o)
+		if not o.cands then
+			o.cands, o.ci, o.tries = resolveGoto(o), 1, 0
+			if #o.cands == 0 then
+				return "fail", "I cannot find " .. (o.q ~= "" and o.q or "that place") .. (o.why and (": " .. o.why) or "")
+			end
+		end
+		local c = o.cands[o.ci]
+		if not c then
+			return "fail", "I cannot get there" .. (o.why and (": " .. o.why) or "")
+		end
+		if c.live and c.live.Parent then
+			local r = c.live:FindFirstChild("HumanoidRootPart") or c.live.PrimaryPart
+			if r then
+				c.pos = r.Position
+			end
+		end
+		local res = Body.goto(c.pos, { label = c.label, why = "you ordered it", within = c.within or 3, timeout = 12 })
+		if res == "arrived" then
+			pcall(Games.addPlace, c.label, c.pos, "order")
+			return "done", "I am at " .. c.label
+		elseif res == "unreachable" then
+			o.why = Body.lastWhy or o.why
+			o.ci = o.ci + 1
+			if not o.cands[o.ci] then
+				return "fail", "I cannot reach " .. c.label .. ": " .. tostring(o.why or "blocked")
+			end
+			return "wait"
+		elseif res == "stuck" or res == "timeout" then
+			o.tries = o.tries + 1
+			if o.tries >= 6 then
+				o.ci = o.ci + 1
+				o.tries = 0
+				if not o.cands[o.ci] then
+					return "fail", "I could not get to " .. c.label
+				end
+			end
+		elseif res == "legsoff" then
+			return "fail", "walking is switched off"
+		elseif res == "nochar" or res == "dead" then
+			task.wait(1)
+		end
+		return "wait"
+	end
+
+	---- parkour
+	local FINISH = { "finish", "end", "goal", "win", "winner", "victory", "summit", "top", "flag", "trophy", "exit", "complete", "final" }
+	local function finishPart()
+		local _, root = parts()
+		local best, bd
+		local n = 0
+		for _, d in ipairs(workspace:GetDescendants()) do
+			n = n + 1
+			if n > 9000 then
+				break
+			end
+			if d:IsA("BasePart") and not World.isOwn(d) then
+				local set = Games.tokenize(d.Name)
+				for _, w in ipairs(FINISH) do
+					if set[w] and not set.start and not set.spawn then
+						local dd = root and flat(d.Position, root.Position) or 0
+						if not bd or dd < bd then
+							best, bd = d, dd
+						end
+						break
+					end
+				end
+			end
+		end
+		return best
+	end
+	function RUN.parkour(o)
+		local char, root, hum = parts()
+		if not (root and hum) then
+			task.wait(0.5)
+			return "wait"
+		end
+		o.started = o.started or os.clock()
+		o.best = o.best or { y = -1e9, far = 0 }
+		o.start = o.start or root.Position
+		if not o.fin then
+			o.fin = finishPart() or false
+		end
+		if o.fin and o.fin.Parent then
+			local p = o.fin.Position
+			local res = Body.goto(Vector3.new(p.X, p.Y + 3, p.Z), { label = o.fin.Name, why = "you ordered parkour: the end of the course", within = 4, timeout = 14, noCheck = true })
+			if res == "arrived" or flat(root.Position, p) < 5 then
+				return "done", "reached " .. o.fin.Name
+			end
+			if res == "legsoff" then
+				return "fail", "walking is switched off"
+			end
+			-- no progress for a long time?
+			local d = flat(root.Position, p) + math.abs(root.Position.Y - p.Y)
+			o.bestD = o.bestD or d
+			if d < o.bestD - 2 then
+				o.bestD, o.noProg = d, 0
+			else
+				o.noProg = (o.noProg or 0) + 1
+				if o.noProg >= 6 then
+					return "fail", "I could not find the way to " .. o.fin.Name
+				end
+			end
+			return "wait"
+		end
+		-- no finish line: climb. The highest place the map says it can reach, else the farthest one in the direction it has been going
+		local T = Brain.Terrain
+		if not T then
+			local r = Body.explore("parkour")
+			return "wait"
+		end
+		local G = T.grid(1, true)
+		local feet = T.feetOf(root, hum)
+		local me = G and T.nodeNear(G, root.Position.X, root.Position.Z, feet)
+		if not me then
+			Body.explore("parkour: finding the course")
+			return "wait"
+		end
+		local res = T.search(G, me, { jump = true })
+		local bestN, bestS
+		for n2, cst in pairs(res.cost) do
+			local p = T.posOf(G, n2)
+			local gain = p.Y - feet
+			local far = flat(p, o.start)
+			local dir = o.heading and ((p.X - root.Position.X) * o.heading.X + (p.Z - root.Position.Z) * o.heading.Z) or 0
+			local sc = gain * 2.2 + dir * 0.35 + far * 0.15 - cst * 0.05
+			if flat(p, root.Position) > 5 and (not bestS or sc > bestS) then
+				bestN, bestS = n2, sc
+			end
+		end
+		local progress = false
+		if root.Position.Y - 0 > o.best.y + 1.5 then
+			o.best.y, progress = root.Position.Y, true
+		end
+		local farNow = flat(root.Position, o.start)
+		if farNow > o.best.far + 4 then
+			o.best.far, progress = farNow, true
+		end
+		if progress then
+			o.noProg = 0
+		else
+			o.noProg = (o.noProg or 0) + 1
+		end
+		if o.noProg >= 7 then
+			return "fail", "I cannot find a way further on this course"
+		end
+		if not bestN then
+			Body.explore("parkour: looking for the next jump")
+			return "wait"
+		end
+		local tp = T.posOf(G, bestN)
+		o.heading = Vector3.new(tp.X - root.Position.X, 0, tp.Z - root.Position.Z)
+		if o.heading.Magnitude > 1 then
+			o.heading = o.heading.Unit
+		end
+		local path = T.pathTo(res, bestN)
+		if path and #path >= 2 then
+			local tok = Body.newToken()
+			Body.now = "parkour toward (" .. math.floor(tp.X) .. "," .. math.floor(tp.Z) .. ")"
+			Body.reason("Parkour: heading for the next higher place")
+			local r = T.follow(path, tok, { timeout = 12, abort = function()
+				return Brain.Threat.enabled() and (Brain.Threat.list[1] and Brain.Threat.list[1].level >= 2) or false
+			end })
+			if tok == Body.token then
+				Body.now = ""
+				pcall(Legs.halt, hum, root)
+			end
+		else
+			Body.explore("parkour")
+		end
+		if os.clock() - o.started > 420 then
+			return "done", "I did the best I could on that course"
+		end
+		return "wait"
+	end
+
+	---- fighting and collecting
+	local function matchesNpc(e, qwords)
+		if #qwords == 0 then
+			return true
+		end
+		for _, w in ipairs(qwords) do
+			local f = Games.tokenize(w)
+			local hit = false
+			for k in pairs(f) do
+				if e.set[k] then
+					hit = true
+				end
+			end
+			if not hit then
+				return false
+			end
+		end
+		return true
+	end
+	function RUN.attack(o)
+		o.qwords = o.qwords or content(wordsOf(o.q))
+		local generic = #o.qwords == 0 or (#o.qwords == 1 and ({ enemies = true, enemy = true, monsters = true, monster = true, mobs = true, mob = true, everything = true, anything = true, zombies = false, bad = true, guys = true, hostile = true, hostiles = true })[o.qwords[1]])
+		if generic then
+			o.qwords = {}
+		end
+		o.started = o.started or os.clock()
+		local pick
+		for _, e in ipairs(Sense.npcs(160)) do
+			if matchesNpc(e, o.qwords) and not (o.skip and o.skip[e.model]) then
+				pick = e
+				break
+			end
+		end
+		if not pick then
+			o.none = (o.none or 0) + 1
+			if o.none >= 4 then
+				return "done", o.kills and o.kills > 0 and ("fought " .. o.kills .. ", none left") or "none of those around"
+			end
+			task.wait(0.8)
+			return "wait"
+		end
+		o.none = 0
+		local res, hits, swings = Body.attack(pick, { why = "you ordered it", timeout = 20 })
+		if res == "defeated" then
+			o.kills = (o.kills or 0) + 1
+		elseif res == "unreachable" or res == "lost" then
+			o.skip = o.skip or {}
+			o.skip[pick.model] = true
+		elseif res == "legsoff" then
+			return "fail", "walking is switched off"
+		end
+		if os.clock() - o.started > 300 then
+			return "done", "fought for a while"
+		end
+		return "wait"
+	end
+	function RUN.collect(o)
+		o.qwords = o.qwords or content(wordsOf(o.q))
+		o.seen = o.seen or {}
+		local function key(p)
+			return math.floor(p.X / 3) .. "," .. math.floor(p.Y / 3) .. "," .. math.floor(p.Z / 3)
+		end
+		o.started = o.started or os.clock()
+		local list = {}
+		for _, c in ipairs(Sense.collectibles(140)) do
+			local ok = #o.qwords == 0
+			if not ok then
+				local set = Games.tokenize(c.name)
+				ok = true
+				for _, w in ipairs(o.qwords) do
+					local hit = false
+					for k in pairs(Games.tokenize(w)) do
+						if set[k] then
+							hit = true
+						end
+					end
+					if not hit then
+						ok = false
+					end
+				end
+			end
+			if ok and not o.seen[key(c.pos)] then
+				list[#list + 1] = c
+			end
+		end
+		if #list == 0 then
+			o.none = (o.none or 0) + 1
+			if o.none >= 3 then
+				return "done", (o.got and o.got > 0) and ("collected " .. o.got .. " places of it") or "nothing like that around"
+			end
+			task.wait(0.8)
+			return "wait"
+		end
+		o.none = 0
+		local c = list[1]
+		local res = Body.goto(c.pos, { label = c.name, why = "you ordered it", within = 2, timeout = 14, item = { pos = c.pos, name = c.name } })
+		o.seen[key(c.pos)] = true -- each one is tried once: something that stays after being touched is not walked to again
+		if res == "arrived" then
+			o.got = (o.got or 0) + 1
+			task.wait(0.3)
+		elseif res == "unreachable" then
+			o.skipped = (o.skipped or 0) + 1
+			task.wait(0.3)
+		elseif res == "legsoff" then
+			return "fail", "walking is switched off"
+		end
+		if os.clock() - o.started > 300 then
+			return "done", "collected for a while"
+		end
+		return "wait"
+	end
+	function RUN.follow(o)
+		local p = playerNamed(o.q)
+		if not p then
+			return "fail", "I do not see a player called " .. tostring(o.q)
+		end
+		if not requestFollow(p) then
+			return "fail", "I cannot follow " .. p.Name .. ": " .. Legs.why()
+		end
+		local t0 = os.clock()
+		while Alive and os.clock() - t0 < 8 and not Body.fleeing do
+			task.wait(0.5)
+		end
+		stopFollow()
+		o.started = o.started or t0
+		if os.clock() - o.started >= (o.secs or 60) then
+			return "done", "followed " .. p.Name
+		end
+		return "wait"
+	end
+	function RUN.flee(o)
+		local top = Threat.top()
+		if top then
+			Body.flee(top)
+			return "done", "ran from " .. tostring(top.name)
+		end
+		local _, root, hum = parts()
+		if root and Body.lastSafe then
+			local res = Body.goto(Body.lastSafe, { label = "somewhere safe", why = "you ordered me to hide", within = 4, timeout = 10 })
+			return "done", "went somewhere safe"
+		end
+		return "done", "nothing to run from"
+	end
+	function RUN.jump(o)
+		local _, root, hum = parts()
+		if hum and Legs.jump(hum, true) then
+			return "done", "jumped"
+		end
+		return "fail", "I cannot jump right now"
+	end
+	function RUN.say(o)
+		local res = M.act({ ["do"] = "say", text = o.text }, { pilot = true })
+		return "done", res
+	end
+	function RUN.click(o)
+		o.qwords = o.qwords or content(wordsOf(o.q))
+		local best
+		for _, t in ipairs(M.targets(true, true)) do
+			if t.kind == "button" or t.kind == "core" then
+				local set = Games.tokenize(t.label)
+				local all = #o.qwords > 0
+				for _, w in ipairs(o.qwords) do
+					local hit = false
+					for k in pairs(Games.tokenize(w)) do
+						if set[k] then
+							hit = true
+						end
+					end
+					if not hit then
+						all = false
+					end
+				end
+				if all then
+					best = t
+					break
+				end
+			end
+		end
+		if not best then
+			o.none = (o.none or 0) + 1
+			if o.none >= 3 then
+				return "fail", "I do not see a button called " .. tostring(o.q)
+			end
+			task.wait(0.6)
+			return "wait"
+		end
+		local res = M.act({ ["do"] = "click", target = best.id, tgt = best }, { pilot = true })
+		local bad = res:find("refused", 1, true) or res:find("could not", 1, true)
+		return bad and "fail" or "done", res
+	end
+	function RUN.use(o)
+		-- a tool in the backpack, a skill, or a button: whichever it is called
+		local q = o.q
+		local char, root, hum = parts()
+		if q == "" then
+			return "fail", "use what?"
+		end
+		if Brain.Gear then
+			local okg, tool = pcall(Brain.Gear.find, q)
+			if okg and tool then
+				local res = M.act({ ["do"] = "equip", name = tool.Name }, { pilot = true })
+				return "done", res
+			end
+		end
+		local bp = lp:FindFirstChildOfClass("Backpack")
+		for _, holder in ipairs({ bp, char }) do
+			if holder then
+				for _, t in ipairs(holder:GetChildren()) do
+					if t:IsA("Tool") and t.Name:lower():find(q, 1, true) then
+						local res = M.act({ ["do"] = "equip", name = t.Name }, { pilot = true })
+						return "done", res
+					end
+				end
+			end
+		end
+		if Brain.Skills then
+			local res, st = Brain.Skills.useByName(q)
+			if st == "ok" or not tostring(res):find("no skill", 1, true) then
+				return st == "ok" and "done" or "fail", res
+			end
+		end
+		o.kind = "click"
+		return RUN.click(o)
+	end
+	function RUN.getweapon(o)
+		if Brain.Combat and Brain.Combat.findWeapon then
+			local res, why = Brain.Combat.findWeapon({ force = o.force })
+			if res == "got" then
+				return "done", why == "I already have one" and why or ("picked up " .. tostring(why))
+			elseif res == "none" then
+				return "fail", "there is no free weapon around"
+			elseif res == "interrupted" then
+				return "wait"
+			end
+			return "fail", tostring(why or "I could not get a weapon")
+		end
+		return "fail", "no way to look for weapons yet"
+	end
+
+	------------------------------------------------------------ the list of orders
+	local function label(o)
+		local k = o.kind
+		if k == "goto" then
+			return (o.inside and "go inside " or "go to ") .. (o.q ~= "" and o.q or "the building")
+		elseif k == "parkour" then
+			return "do the parkour"
+		elseif k == "stay" then
+			return "stay here" .. (o.secs and (" for " .. o.secs .. "s") or "")
+		elseif k == "attack" then
+			return "fight " .. (o.q ~= "" and o.q or "enemies")
+		elseif k == "collect" then
+			return "collect " .. (o.q ~= "" and o.q or "loot")
+		elseif k == "free" then
+			return "use my own free will"
+		end
+		return o.src or o.text or k
+	end
+	Orders.label = label
+	-- orders the body carries out itself (a "text" order is for the planner)
+	local function bodyKind(o)
+		return o.kind ~= "text"
+	end
+	function Orders.current()
+		for _, o in ipairs(Orders.list) do
+			if o.status == "active" then
+				return o
+			end
+		end
+		return nil
+	end
+	function Orders.active()
+		if not on() then
+			return false
+		end
+		local o = Orders.current()
+		return o ~= nil and bodyKind(o)
+	end
+	-- while an order is being carried out the planner does not need to ask the AI for ideas (it saves API calls too)
+	function Orders.blocksPlanner()
+		return Orders.active()
+	end
+	function Orders.cancel(why)
+		local n = 0
+		for _, o in ipairs(Orders.list) do
+			if o.status == "active" then
+				o.status = "cancelled"
+				n = n + 1
+			end
+		end
+		if n > 0 then
+			say("Orders cleared" .. (why and (": " .. why) or ""))
+			if Brain.Pilot then
+				Brain.Pilot.planDoneAt = 0
+			end
+		end
+		return n
+	end
+	-- the owner said something: returns the orders it contains (empty when it was only a remark)
+	function Orders.add(text)
+		if not on() then
+			return {}
+		end
+		local parsed = Orders.parse(text)
+		if #parsed == 0 then
+			return {}
+		end
+		local replaced = false
+		for _, o in ipairs(Orders.list) do
+			if o.status == "active" then
+				o.status = "replaced"
+				replaced = true
+			end
+		end
+		local made = {}
+		for _, p in ipairs(parsed) do
+			p.id = Orders.nextId
+			Orders.nextId = Orders.nextId + 1
+			p.status = "active"
+			p.at = os.clock()
+			p.plans = 0
+			Orders.list[#Orders.list + 1] = p
+			Orders.stats.given = Orders.stats.given + 1
+			made[#made + 1] = p
+		end
+		while #Orders.list > 30 do
+			table.remove(Orders.list, 1)
+		end
+		local names = {}
+		for _, p in ipairs(made) do
+			names[#names + 1] = label(p)
+		end
+		say("Order: " .. table.concat(names, ", then "))
+		-- a new order interrupts whatever it was walking to
+		pcall(function()
+			Body.newToken()
+		end)
+		if Brain.Pilot then
+			Brain.Pilot.ready = nil
+			Brain.Pilot.holdUntil = 0
+			Brain.Pilot.orderAt = os.clock() -- a plan that is still running stops at its next step
+		end
+		return made
+	end
+
+	local function finish(o, status, msg)
+		o.status = status
+		o.result = msg
+		if status == "done" then
+			Orders.stats.done = Orders.stats.done + 1
+			say("Order done: " .. label(o) .. (msg and msg ~= "" and (" (" .. msg .. ")") or ""))
+		else
+			Orders.stats.failed = Orders.stats.failed + 1
+			say("(!) Could not do the order '" .. label(o) .. "': " .. tostring(msg))
+		end
+		if Brain.Pilot then
+			Brain.Pilot.planDoneAt = 0
+			Brain.Pilot.lastPlanEnd = os.clock()
+		end
+	end
+
+	-- one slice of the current order. returns true when it used the body
+	function Orders.step()
+		if not on() then
+			return false
+		end
+		local o = Orders.current()
+		if not o or not bodyKind(o) then
+			return false
+		end
+		local char, root, hum = parts()
+		if not (root and hum) or hum.Health <= 0 then
+			return false
+		end
+		local run = RUN[o.kind]
+		if not run then
+			finish(o, "failed", "I do not know how to do that yet")
+			return true
+		end
+		-- legs off: only orders that do not need legs can run
+		local needsLegs = ({ goto = true, parkour = true, attack = true, collect = true, follow = true, flee = true, jump = true })[o.kind]
+		if needsLegs and cfg.Legs == false then
+			finish(o, "failed", "walking is switched off, so I cannot do that")
+			return true
+		end
+		o.slices = (o.slices or 0) + 1
+		local deadline = o.kind == "stay" and 900 or (o.kind == "parkour" and 480 or 240)
+		if os.clock() - o.at > deadline then
+			finish(o, "failed", "it took too long")
+			return true
+		end
+		local ok, status, msg = pcall(run, o)
+		if not ok then
+			finish(o, "failed", "error: " .. tostring(status):sub(1, 80))
+			return true
+		end
+		if status == "done" then
+			finish(o, "done", msg)
+		elseif status == "fail" then
+			finish(o, "failed", msg)
+		end
+		return true
+	end
+
+	-- what the planner is told
+	function Orders.text()
+		local L = {}
+		for _, o in ipairs(Orders.list) do
+			if o.status == "active" then
+				if o.kind == "text" then
+					L[#L + 1] = "- " .. (o.q or o.src or "") .. " (carry this out with your own steps; when it is finished add \"order_done\":true to your reply)"
+				else
+					L[#L + 1] = "- " .. label(o) .. " (your body is doing this itself)"
+				end
+			end
+		end
+		if #L == 0 then
+			return ""
+		end
+		return "OWNER ORDERS (your owner told you to do this. It comes before your own plans and your free will):\n" .. table.concat(L, "\n")
+	end
+	-- the planner says a text order is done
+	function Orders.planDone()
+		for _, o in ipairs(Orders.list) do
+			if o.status == "active" and o.kind == "text" then
+				finish(o, "done", "the AI says it is finished")
+			end
+		end
+	end
+	-- an order only the planner handles lives for a few plans
+	function Orders.afterPlan()
+		for _, o in ipairs(Orders.list) do
+			if o.status == "active" and o.kind == "text" then
+				o.plans = o.plans + 1
+				if o.plans >= 6 or os.clock() - o.at > 240 then
+					finish(o, "done", "I gave it my best effort")
+				end
+			end
+		end
+	end
+	function Orders.status()
+		local L = {}
+		for i = #Orders.list, math.max(1, #Orders.list - 5), -1 do
+			local o = Orders.list[i]
+			local st = o.status == "active" and "doing" or (o.status == "done" and "done" or (o.status == "failed" and ("could not: " .. tostring(o.result)) or o.status))
+			L[#L + 1] = label(o) .. "  [" .. st .. "]"
+		end
+		return L
+	end
+	function Orders.summary()
+		local o = Orders.current()
+		if o then
+			return "Order: " .. label(o)
+		end
+		return ""
+	end
+end)()
 ------------------------------------------------------------------ the pilot: plays the game on its own, learns by doing, and shows you what it is up to
 ;(function()
-	local Pilot = { active = false, paused = false, goal = "", thought = "", state = "off", feed = {}, steps = 0, plans = 0, startedAt = 0, fail = {}, llmErrors = 0, lastRes = {} }
+	local Pilot = { active = false, paused = false, goal = "", thought = "", state = "off", feed = {}, steps = 0, plans = 0, startedAt = 0, fail = {}, llmErrors = 0, lastRes = {}, curIds = {}, stayUntil = 0, planDoneAt = 0, stepNo = 0, stepOf = 0 }
 	Brain.Pilot = Pilot
 	local Games, Body, Threat, Sense = Brain.Games, Brain.Body, Brain.Threat, Brain.Sense
 	local M = World.mouse
@@ -15816,6 +19803,14 @@ end)()
 		if text == "" then
 			return false
 		end
+		-- a command ("go inside the house", "parkour", "stay") is an order: it comes before its own plans
+		if Brain.Orders then
+			local made = Brain.Orders.add(text)
+			if #made > 0 then
+				changed()
+				return true
+			end
+		end
 		Pilot.notes[#Pilot.notes + 1] = { t = text, left = 3 }
 		while #Pilot.notes > 4 do
 			table.remove(Pilot.notes, 1)
@@ -15838,9 +19833,35 @@ end)()
 
 	------------------------------------------------------------ resolving what the planner pointed at
 	local byId = {}
+	-- ids belong to the plan that was made with them: while the AI was thinking the numbering of the screen may have changed
 	local function findTarget(id)
-		return id and (M.byId[tostring(id)] or byId[tostring(id)] or M.extra[tostring(id)]) or nil
+		if id == nil then
+			return nil
+		end
+		id = tostring(id)
+		return Pilot.curIds[id] or M.byId[id] or byId[id] or M.extra[id] or nil
 	end
+	-- where a thing is right now (creatures and objects move while the AI thinks)
+	local function livePos(t)
+		if not t then
+			return nil
+		end
+		local o = t.obj
+		if o and o.Parent then
+			local ok, p = pcall(function()
+				if o:IsA("BasePart") then
+					return o.Position
+				end
+				local r = o:FindFirstChild("HumanoidRootPart") or o.PrimaryPart or o:FindFirstChildWhichIsA("BasePart")
+				return r and r.Position or nil
+			end)
+			if ok and p then
+				return p
+			end
+		end
+		return (t.e and t.e.pos) or t.pos
+	end
+	Pilot.livePos = livePos
 	local function placePos(name)
 		local g = Games.cur(false)
 		name = tostring(name or ""):lower()
@@ -15922,8 +19943,8 @@ end)()
 			if not pos then
 				return "goto needs a target id, x and z, or a known place", "fail"
 			end
-			if t and t.e then
-				pos = t.e.pos
+			if t and (t.e or t.obj) then
+				pos = livePos(t) or pos
 			end
 			local res = Body.goto(pos, { label = label, why = why, within = 4 })
 			if res == "unreachable" then
@@ -16004,7 +20025,7 @@ end)()
 			if t.kind == "button" or t.kind == "core" then
 				return "use click for screen buttons", "fail"
 			end
-			local pos = (t.e and t.e.pos) or t.pos
+			local pos = livePos(t)
 			if not pos then
 				return "that has no position", "fail"
 			end
@@ -16022,11 +20043,8 @@ end)()
 			local target = t
 			if t.kind == "npc" then
 				target = { id = "tmp1", kind = "model", obj = t.obj, label = t.label, pos = pos }
-				byId.tmp1 = target
-				M.byId.tmp1 = target
 			else
 				target = refind(t) or t
-				M.byId[target.id or "tmp2"] = target
 				target.id = target.id or "tmp2"
 			end
 			-- hold what it works with (the pickaxe for ore, the key for a door) and swing it when the thing is not a prompt
@@ -16039,22 +20057,35 @@ end)()
 			if Brain.Camera then
 				pcall(Brain.Camera.face, pos, "using " .. tostring(t.label), 0.9) -- turn to it, so the click lands on the screen
 			end
-			local res2 = M.act({ ["do"] = "click", target = target.id }, { auto = true, pilot = true })
+			local lsnap = Brain.Ledger and Brain.Ledger.snap() or nil
+			local res2 = M.act({ ["do"] = "click", target = target.id, tgt = target }, { auto = true, pilot = true })
 			Games.addPlace(t.label, pos, t.kind)
 			local okk = not (res2:find("no visible change", 1, true) or res2:find("refused", 1, true) or res2:find("could not", 1, true) or res2:find("too far", 1, true))
+			if lsnap and t.kind ~= "npc" and t.kind ~= "player" then
+				local why = Brain.Ledger.after(t, lsnap, okk)
+				if why then
+					res2, okk = res2 .. " (blocked: " .. why .. ")", false
+				end
+			end
 			pcall(Curious.mark, t, res2, okk)
 			return res2, okk and "ok" or "fail"
 		elseif d == "click" or d == "rightclick" or d == "doubleclick" or d == "move" or d == "drag" or d == "scroll" then
-			local a = { ["do"] = d, target = st.target, x = st.x, y = st.y, to_x = st.to_x, to_y = st.to_y, amount = st.amount }
+			local a = { ["do"] = d, target = st.target, x = st.x, y = st.y, to_x = st.to_x, to_y = st.to_y, amount = st.amount, tgt = t }
 			if t and (t.kind == "button" or t.kind == "core") then
 				local fresh = refind(t)
 				if fresh then
-					M.byId[fresh.id] = fresh
-					a.target = fresh.id
+					a.target, a.tgt = fresh.id, fresh
 				end
 			end
+			local lsnap = (t and (t.kind == "button" or t.kind == "core") and Brain.Ledger) and Brain.Ledger.snap() or nil
 			local res = M.act(a, { auto = true, pilot = true })
 			local okk = not (res:find("no visible change", 1, true) or res:find("refused", 1, true) or res:find("could not", 1, true) or res:find("unknown", 1, true) or res:find("off the screen", 1, true))
+			if lsnap and not res:find("skipped", 1, true) then
+				local why = Brain.Ledger.after(t, lsnap, okk)
+				if why then
+					res, okk = res .. " (blocked: " .. why .. ")", false
+				end
+			end
 			if res:find("refused", 1, true) then
 				feed(res)
 			end
@@ -16082,15 +20113,33 @@ end)()
 		elseif d == "wait" then
 			local s2 = math.clamp(tonumber(st.seconds) or 2, 0.3, 8)
 			local t0 = os.clock()
-			while Alive and Pilot.active and os.clock() - t0 < s2 and not Body.fleeing do
+			Pilot.stayUntil = t0 + s2 -- standing still because it chose to
+			while Alive and Pilot.active and os.clock() - t0 < s2 and not Body.fleeing and not (Pilot.orderAt and Pilot.orderAt > t0) do
 				task.wait(0.2)
 			end
+			Pilot.stayUntil = 0
 			return "waited", "ok"
 		elseif d == "skill" or d == "ability" or d == "cast" then
 			if not Brain.Skills then
 				return "no skills", "fail"
 			end
 			return Brain.Skills.useByName(st.name or st.target or st.skill)
+		elseif d == "getweapon" or d == "weapon" then
+			if not Brain.Combat then
+				return "no combat part", "fail"
+			end
+			local res, why = Brain.Combat.findWeapon({ force = st.force })
+			if res == "got" then
+				return "have a weapon: " .. tostring(why), "ok"
+			elseif res == "interrupted" then
+				return "stopped looking for a weapon (" .. tostring(why) .. ")", "stop"
+			end
+			return "no weapon: " .. tostring(why), "fail"
+		elseif d == "reload" then
+			if not Brain.Combat then
+				return "no combat part", "fail"
+			end
+			return Brain.Combat.reload() and "reloaded" or "could not reload", "ok"
 		elseif d == "playbook" or d == "play" then
 			if not Brain.Playbook then
 				return "no playbook", "fail"
@@ -16100,7 +20149,7 @@ end)()
 			if d == "say" and cfg.PlayTalk == false then
 				return "I decided not to chat while playing", "ok"
 			end
-			local res = M.act({ ["do"] = d, name = st.name or st.tool or st["for"] or st.purpose, key = st.key, text = st.text or st.message, x = st.x, y = st.y, target = st.target }, { auto = true, pilot = true })
+			local res = M.act({ ["do"] = d, name = st.name or st.tool or st["for"] or st.purpose, key = st.key, text = st.text or st.message, x = st.x, y = st.y, target = st.target, tgt = t }, { auto = true, pilot = true })
 			return res, (res:find("no tool", 1, true) or res:find("isn't possible", 1, true)) and "fail" or "ok"
 		end
 		return "I do not know how to " .. d, "fail"
@@ -16119,8 +20168,10 @@ How you play:
 - Chat: almost never. Use "say" only when you have something specific and new to say about what just happened (rare, most plans have no say). Never greet or say hello, never repeat or reword a message you already sent, and only words to type, no labels.
 Reply with ONLY a JSON object:
 {"thought":"one short sentence","goal":"short goal","steps":[{"do":"goto","target":"p1","why":"short"}],"learned":["short lesson"],"emotion":"excited"}
-Steps ("do"): skill (name of one of your SKILLS), goto (target id, or x and z, or place name), interact (target id: walk up and use a prompt, clicker, seat or character), click (target id of a screen button, or x and y as fractions 0 to 1 of the screen), attack (target id of a creature), collect (target id, or "what":"coin"), flee, explore, follow (target id of a player, seconds), equip (name of a tool, or "for":"weapon" / "light" / "key" / "pickaxe"), use (use the tool you hold), jump, key (one letter or Space), say (text), wait (seconds).
-Give 1 to 4 steps. Use ids exactly as listed (g1, p2, n1, k1...). If nothing is worth doing, explore.]]
+Steps ("do"): skill (name of one of your SKILLS), goto (target id, or x and z, or place name), interact (target id: walk up and use a prompt, clicker, seat or character), click (target id of a screen button, or x and y as fractions 0 to 1 of the screen), attack (target id of a creature), collect (target id, or "what":"coin"), flee, explore, follow (target id of a player, seconds), equip (name of a tool, or "for":"weapon" / "light" / "key" / "pickaxe"), use (use the tool you hold), jump, key (one letter or Space), say (text), getweapon (go and pick up a weapon that is lying around for free, never one that costs Robux), reload (reload the gun you hold), wait (seconds).
+Give 1 to 4 steps. Use ids exactly as listed (g1, p2, n1, k1...). If nothing is worth doing, explore.
+OWNER ORDERS (if listed) are commands from your owner: they come before your own goals. Carry them out with your steps and add "order_done":true to your reply when they are finished.
+You think while your body keeps moving. A click, skill, equip, key or say step that has "with":"walk" is done by your hands WHILE your legs carry out the other steps (tap a menu button while running to a place).]]
 
 	local function experience()
 		local g = Games.cur(false)
@@ -16200,13 +20251,26 @@ Give 1 to 4 steps. Use ids exactly as listed (g1, p2, n1, k1...). If nothing is 
 		return { thought = "no AI answer, playing by instinct", goal = Pilot.goal ~= "" and Pilot.goal or "explore and learn", steps = steps, learned = {} }
 	end
 
-	function Pilot.think()
+	------------------------------------------------------------ thinking (the planner) and doing (the executor) run side by side
+	-- the AI reads the situation and asks the model in the background; the body never stands around waiting for the answer
+	local function copyIds()
+		local ids = {}
+		for k, v in pairs(M.byId or {}) do
+			ids[k] = v
+		end
+		for k, v in pairs(M.extra or {}) do
+			ids[k] = v
+		end
+		return ids
+	end
+
+	-- one round of planning: look, ask the AI (or fall back to instinct). It never moves the body.
+	-- returns plan, ids (what "g1", "n2"... meant when the plan was made), usedLocal
+	function Pilot.plan()
 		local char, root, hum = parts()
 		if not (root and hum) then
-			return
+			return nil
 		end
-		Pilot.state = "thinking"
-		changed()
 		local report = Sense.report()
 		local kws = keywords(Pilot.goal ~= "" and Pilot.goal or "play").list
 		local L = {}
@@ -16215,6 +20279,18 @@ Give 1 to 4 steps. Use ids exactly as listed (g1, p2, n1, k1...). If nothing is 
 			L[#L + 1] = gp
 		end
 		L[#L + 1] = experience()
+		local ot = Brain.Orders and Brain.Orders.text() or ""
+		if ot ~= "" then
+			L[#L + 1] = ot
+		end
+		local ct = Brain.Combat and Brain.Combat.text() or ""
+		if ct ~= "" then
+			L[#L + 1] = ct
+		end
+		local lt = Brain.Ledger and Brain.Ledger.text() or ""
+		if lt ~= "" then
+			L[#L + 1] = lt
+		end
 		if #Pilot.notes > 0 then
 			local nl = {}
 			for i = #Pilot.notes, 1, -1 do
@@ -16243,6 +20319,10 @@ Give 1 to 4 steps. Use ids exactly as listed (g1, p2, n1, k1...). If nothing is 
 		local mapt = Brain.Terrain and Brain.Terrain.summary() or ""
 		if mapt ~= "" then
 			L[#L + 1] = mapt
+		end
+		local sgt = Brain.Sight and Brain.Sight.text() or ""
+		if sgt ~= "" then
+			L[#L + 1] = sgt
 		end
 		local vist = Brain.Vision and Brain.Vision.text() or ""
 		if vist ~= "" then
@@ -16285,6 +20365,7 @@ Give 1 to 4 steps. Use ids exactly as listed (g1, p2, n1, k1...). If nothing is 
 		if cfg.SmartMode then
 			L[#L + 1] = "Your feeling right now: " .. Smart.label()
 		end
+		local ids = copyIds()
 		local sys = makeSystemPrompt() .. "\n\n" .. PILOT_SYS
 		local msgs = { { role = "system", content = sys }, { role = "user", content = table.concat(L, "\n\n") } }
 		local plan
@@ -16314,14 +20395,23 @@ Give 1 to 4 steps. Use ids exactly as listed (g1, p2, n1, k1...). If nothing is 
 		end
 		local usedLocal = false
 		if not plan then
-			plan = Pilot.localPlan()
+			if cfg.KeepMoving == false then
+				-- "keep moving" is off: with no answer from the AI it waits instead of playing by instinct
+				plan = { thought = "waiting for the AI brain", goal = Pilot.goal ~= "" and Pilot.goal or "wait for the AI", steps = { { ["do"] = "wait", seconds = 1 } }, learned = {} }
+			else
+				plan = Pilot.localPlan()
+			end
 			usedLocal = true
 		end
+		return plan, ids, usedLocal
+	end
+
+	-- goal, thought, feelings and lessons of a plan that is about to run
+	local function accept(plan, usedLocal)
 		Pilot.plans = Pilot.plans + 1
 		if Brain.Playbook and not usedLocal then
 			plan = Brain.Playbook.enforce(plan)
 		end
-		-- goal, thought, feelings
 		if type(plan.goal) == "string" and trim(plan.goal) ~= "" then
 			local g2 = trimChars(oneLine(plan.goal), 100)
 			if g2 ~= Pilot.goal then
@@ -16332,54 +20422,142 @@ Give 1 to 4 steps. Use ids exactly as listed (g1, p2, n1, k1...). If nothing is 
 			end
 		end
 		Pilot.thought = trimChars(oneLine(tostring(plan.thought or "")), 120)
+		if Brain.Orders then
+			if plan.order_done == true or plan.orderDone == true then
+				pcall(Brain.Orders.planDone)
+			end
+			pcall(Brain.Orders.afterPlan)
+		end
 		if type(plan.emotion) == "string" and cfg.SmartMode then
 			pcall(Smart.applyModel, plan.emotion, 0.3)
 		end
 		for _, l in ipairs(type(plan.learned) == "table" and plan.learned or {}) do
 			l = trimChars(oneLine(tostring(l)), 140)
 			if #l >= 8 then
-				if Games.tip(l) then
-					feed("Learned: " .. l)
+				local other = Games.mentionsOther(l)
+				if other then
+					feed("(Not saved: that lesson is about another game, " .. other .. ")")
+				else
+					if Games.tip(l) then
+						feed("Learned: " .. l)
+					end
+					pcall(World.lesson, l)
 				end
-				pcall(World.lesson, l)
 			end
 		end
-		-- run the steps
+		return plan
+	end
+
+	-- steps the hands can do while the legs keep walking: screen buttons, skills, tools, keys, chat
+	local HANDS = { click = true, rightclick = true, doubleclick = true, move = true, drag = true, scroll = true, skill = true, ability = true, cast = true, equip = true, use = true, key = true, say = true, tap = true, press = true }
+	local function handsStep(st)
+		local d = tostring(st["do"] or st.action or ""):lower()
+		if not HANDS[d] or not (st.with or st.parallel) then
+			return false
+		end
+		if d == "click" or d == "tap" or d == "press" then
+			local t = findTarget(st.target)
+			if t and not (t.kind == "button" or t.kind == "core") then
+				return false -- using something in the world means walking up to it
+			end
+		end
+		if d == "key" then
+			local k = tostring(st.key or ""):upper()
+			if k == "W" or k == "A" or k == "S" or k == "D" or k == "SPACE" or k == "" then
+				return false
+			end
+		end
+		return true
+	end
+	local function record(st, res, status)
+		res = trimChars(tostring(res), 160)
+		Pilot.lastRes[#Pilot.lastRes + 1] = ("%s -> %s"):format(tostring(st["do"] or st.action), res)
+		feed((status == "ok" and "" or "(!) ") .. res)
+	end
+
+	-- the executor: run the steps of one plan
+	function Pilot.runPlan(plan, ids, usedLocal)
+		Pilot.curIds = ids or {}
+		Pilot.holdUntil = 0
+		plan = accept(plan, usedLocal)
 		local before = snapshot()
 		Pilot.lastRes = {}
 		local anyOk, stop = false, false
+		local planStart = os.clock()
 		local steps = type(plan.steps) == "table" and plan.steps or {}
+		local n = math.min(4, #steps)
 		Pilot.state = usedLocal and "playing (instinct)" or "playing"
-		for i = 1, math.min(4, #steps) do
+		Pilot.running, Pilot.stepOf, Pilot.stepNo = true, n, 0
+		local handsLeft = 0
+		for i = 1, n do
 			local st = steps[i]
 			if type(st) == "table" then
+				Pilot.stepNo = i
 				if not Alive or not Pilot.active or Pilot.paused then
 					break
 				end
-				if Body.fleeing then
-					Pilot.lastRes[#Pilot.lastRes + 1] = "I had to run from danger, plan cut short"
+				if Body.fleeing or (Brain.Combat and Brain.Combat.busy()) then
+					Pilot.lastRes[#Pilot.lastRes + 1] = "I had to run from danger or fight back, plan cut short"
 					break
 				end
-				local before1 = snapshot()
-				local res, status = Pilot.exec(st)
-				res = trimChars(tostring(res), 160)
-				Pilot.lastRes[#Pilot.lastRes + 1] = ("%s -> %s"):format(tostring(st["do"] or st.action), res)
-				feed((status == "ok" and "" or "(!) ") .. res)
-				local bits = progress(before1, snapshot())
-				if #bits > 0 then
-					anyOk = true
-					pcall(Games.tip, ("%s: %s"):format(trimChars(res, 60), bits[1]))
-					pcall(World.lesson, ("%s gave %s"):format(trimChars(res, 60), bits[1]))
-				end
-				if status == "ok" then
-					anyOk = true
-				end
-				if status == "stop" then
-					stop = true
+				if Pilot.orderAt and Pilot.orderAt > planStart then
+					Pilot.lastRes[#Pilot.lastRes + 1] = "the owner gave an order, plan dropped"
 					break
 				end
-				task.wait(0.1)
+				if handsStep(st) and not Pilot.handsBusy then
+					-- the hands work while the legs go on
+					Pilot.handsBusy = true
+					handsLeft = handsLeft + 1
+					task.spawn(function()
+						local okx, res, status = pcall(Pilot.exec, st)
+						if not okx then
+							res, status = "error: " .. tostring(res), "fail"
+						end
+						record(st, res, status)
+						if status == "ok" then
+							anyOk = true
+						end
+						Pilot.handsBusy = false
+						handsLeft = handsLeft - 1
+					end)
+				else
+					local before1 = snapshot()
+					local okx, res, status = pcall(Pilot.exec, st)
+					if not okx then
+						res, status = "error: " .. tostring(res), "fail"
+					end
+					record(st, res, status)
+					local bits = progress(before1, snapshot())
+					if #bits > 0 then
+						anyOk = true
+						pcall(Games.tip, ("%s: %s"):format(trimChars(tostring(res), 60), bits[1]))
+						pcall(World.lesson, ("%s gave %s"):format(trimChars(tostring(res), 60), bits[1]))
+					end
+					if status == "ok" then
+						anyOk = true
+					end
+					if status == "stop" then
+						stop = true
+						break
+					end
+					task.wait(0.05)
+				end
 			end
+		end
+		local t0 = os.clock()
+		while handsLeft > 0 and Alive and os.clock() - t0 < 6 do
+			task.wait(0.1)
+		end
+		Pilot.running, Pilot.stepNo, Pilot.stepOf = false, 0, 0
+		Pilot.lastPlanEnd = os.clock()
+		do
+			local _, r9 = parts()
+			Pilot.anchor = r9 and r9.Position or Pilot.anchor
+		end
+		-- it chose to stand and wait: it stays put until its next idea arrives (free will: it moves on only when it wants to)
+		local lastStep = steps[n]
+		if type(lastStep) == "table" and tostring(lastStep["do"] or lastStep.action or ""):lower() == "wait" and not stop then
+			Pilot.holdUntil = os.clock() + 20
 		end
 		-- did it get anywhere?
 		local gk = goalKey(Pilot.goal)
@@ -16402,22 +20580,105 @@ Give 1 to 4 steps. Use ids exactly as listed (g1, p2, n1, k1...). If nothing is 
 		changed()
 	end
 
+	-- plan and run in one go (kept for callers that want a single blocking round)
+	function Pilot.think()
+		local plan, ids, usedLocal = Pilot.plan()
+		if plan then
+			Pilot.runPlan(plan, ids, usedLocal)
+		end
+	end
+
+	-- nothing planned yet: a player does not freeze while thinking, it keeps looking around
+	function Pilot.instinct()
+		if cfg.KeepMoving == false or os.clock() < Pilot.stayUntil or os.clock() < (Pilot.holdUntil or 0) or Body.fleeing or cfg.Legs == false or not Core.Legs.can() then
+			return false
+		end
+		if os.clock() - (Pilot.lastPlanEnd or 0) < 0.8 then
+			return false -- a moment to look around after finishing something
+		end
+		local char, root = parts()
+		if not root then
+			return false
+		end
+		Pilot.instinctOn = true
+		Pilot.state = "looking around while it thinks"
+		-- it stays near where it was last busy; it only goes far when a plan says so
+		local anchor = Pilot.anchor or root.Position
+		if (anchor - root.Position).Magnitude > 40 then
+			anchor = root.Position
+		end
+		local ok = pcall(Body.patrol, anchor, "while I think", 6, "instinct")
+		Pilot.instinctOn = false
+		return ok
+	end
+
 	function Pilot.onDeath(cause)
 		Pilot.died = os.clock()
 		Pilot.diedBy = cause
+		Pilot.ready = nil -- a plan made before dying is about a world that is gone
 		feed("I died" .. (cause and (" to " .. cause) or "") .. ". Respawning and being more careful.")
 		Body.newToken()
 		changed()
 	end
 
-	------------------------------------------------------------ the loop
+	------------------------------------------------------------ the loops
 	local lastTick
+	local function wantPlan()
+		if Pilot.paused or Pilot.planning or Pilot.ready then
+			return false
+		end
+		local char, root, hum = parts()
+		if not (root and hum) or hum.Health <= 0 then
+			return false
+		end
+		if M.running or M.pending or M.preempt then
+			return false
+		end
+		if Core.Legs.yielding() and not Core.Legs.hardOff() then
+			return false
+		end
+		if Pilot.running and Pilot.stepNo < Pilot.stepOf then
+			return false -- it is in the middle of a plan: think about the next one when it reaches the last step
+		end
+		if Brain.Orders and Brain.Orders.blocksPlanner() then
+			return false -- the body is doing what the owner ordered: no need to ask the AI for ideas
+		end
+		local interval = math.max(1.5, tonumber(cfg.PilotEvery) or 4) + (Keys.slowSecs and Keys.slowSecs() or 0)
+		return os.clock() - Pilot.planDoneAt >= interval
+	end
+	local function plannerLoop()
+		if Pilot.plannerRunning then
+			return
+		end
+		Pilot.plannerRunning = true
+		while Alive and Pilot.active do
+			task.wait(0.3)
+			if wantPlan() then
+				Pilot.planning, Pilot.thinking = true, true
+				changed()
+				local ok, plan, ids, usedLocal = pcall(Pilot.plan)
+				Pilot.planning, Pilot.thinking = false, false
+				Pilot.planDoneAt = os.clock()
+				if ok and plan and Pilot.active then
+					Pilot.ready = { plan = plan, ids = ids, usedLocal = usedLocal, at = os.clock() }
+					if Pilot.instinctOn and Body.owner == "instinct" and Body.ownerTok == Body.token then
+						Body.newToken() -- the plan is here: stop the stroll and do it
+					end
+				elseif not ok then
+					feed("Error while thinking: " .. trimChars(tostring(plan), 80))
+					Pilot.planDoneAt = os.clock() + 4
+				end
+				changed()
+			end
+		end
+		Pilot.plannerRunning = false
+		Pilot.planning, Pilot.thinking = false, false
+	end
 	local function loop()
 		if Pilot.loopRunning then
 			return
 		end
 		Pilot.loopRunning = true
-		local lastPlan = 0
 		lastTick = os.clock()
 		while Alive and Pilot.active do
 			task.wait(0.3)
@@ -16433,25 +20694,58 @@ Give 1 to 4 steps. Use ids exactly as listed (g1, p2, n1, k1...). If nothing is 
 					Pilot.state = "waiting to respawn"
 				elseif Body.fleeing then
 					Pilot.state = "running from danger"
+				elseif Brain.Combat and Brain.Combat.busy() then
+					Pilot.state = "fighting back"
 				elseif M.running or M.pending or M.preempt then
 					Pilot.state = "doing what you asked"
 				elseif Core.Legs.yielding() and not Core.Legs.hardOff() then
 					Pilot.state = "you are steering"
+				elseif Brain.Orders and Brain.Orders.active() then
+					Pilot.state = "obeying your order"
+					changed()
+					local okO, errO = pcall(Brain.Orders.step)
+					if not okO then
+						feed("Error while obeying: " .. trimChars(tostring(errO), 80))
+						pcall(Brain.Orders.cancel, "error")
+					end
 				elseif Brain.Playbook and select(2, pcall(Brain.Playbook.step)) == true then
 					Pilot.state = "following my game file"
 					changed()
-				elseif nowc - lastPlan >= math.max(1.5, tonumber(cfg.PilotEvery) or 4) + (Keys.slowSecs and Keys.slowSecs() or 0) then
-					local ok, err = pcall(Pilot.think)
-					lastPlan = os.clock()
-					if not ok then
-						feed("Error while playing: " .. trimChars(tostring(err), 80))
-						Pilot.state = "playing"
-						lastPlan = os.clock() + 4
+				elseif Pilot.ready then
+					local r = Pilot.ready
+					Pilot.ready = nil
+					if os.clock() - r.at > 30 then
+						Pilot.planDoneAt = 0 -- it went stale while the body was busy: think again right away
+					else
+						local ok, err = pcall(Pilot.runPlan, r.plan, r.ids, r.usedLocal)
+						if not ok then
+							Pilot.running, Pilot.stepNo, Pilot.stepOf = false, 0, 0
+							feed("Error while playing: " .. trimChars(tostring(err), 80))
+							Pilot.state = "playing"
+							Pilot.planDoneAt = os.clock() + 2
+						end
+					end
+				else
+					-- nothing planned yet. A slow or failing AI brain must not stall the game: after a few seconds the simple brain plays
+					local idle = os.clock() - math.max(Pilot.lastPlanEnd or 0, Pilot.startedAt or 0)
+					if cfg.KeepMoving ~= false and idle > 6 and os.clock() >= (Pilot.holdUntil or 0) and not Body.fleeing and Core.Legs.can() then
+						local okp, plan = pcall(Pilot.localPlan)
+						if okp and plan then
+							local ids = copyIds()
+							local ok, err = pcall(Pilot.runPlan, plan, ids, true)
+							if not ok then
+								Pilot.running, Pilot.stepNo, Pilot.stepOf = false, 0, 0
+								feed("Error while playing: " .. trimChars(tostring(err), 80))
+								Pilot.lastPlanEnd = os.clock()
+							end
+						end
+					else
+						pcall(Pilot.instinct)
 					end
 				end
-			end
-		end
-		Pilot.loopRunning = false
+				end
+				end
+				Pilot.loopRunning = false
 		if not Pilot.active then
 			Pilot.state = "off"
 		end
@@ -16508,7 +20802,9 @@ Give 1 to 4 steps. Use ids exactly as listed (g1, p2, n1, k1...). If nothing is 
 				feed(ok and ("Studied the game file: " .. msg) or ("Could not study yet: " .. tostring(msg)))
 			end)
 		end
+		Pilot.ready, Pilot.planDoneAt, Pilot.running, Pilot.stayUntil = nil, 0, false, 0
 		task.spawn(loop)
+		task.spawn(plannerLoop)
 		changed()
 		return true
 	end
@@ -16517,6 +20813,7 @@ Give 1 to 4 steps. Use ids exactly as listed (g1, p2, n1, k1...). If nothing is 
 			return
 		end
 		Pilot.active = false
+		Pilot.ready = nil
 		cfg.Pilot = false
 		saveCfg()
 		Body.stop()
@@ -16542,10 +20839,10 @@ Give 1 to 4 steps. Use ids exactly as listed (g1, p2, n1, k1...). If nothing is 
 		local char, root, hum = parts()
 		local g = Games.cur(false)
 		return {
-			active = Pilot.active, paused = Pilot.paused, state = Pilot.state, goal = Pilot.goal, thought = Pilot.thought,
+			active = Pilot.active, paused = Pilot.paused, state = Pilot.state .. ((Pilot.thinking and Pilot.active and not Pilot.paused) and " + thinking" or ""), goal = Pilot.goal, thought = Pilot.thought,
 			now = Body.now, why = Body.why, hp = hum and hum.Health or 0, maxhp = hum and hum.MaxHealth or 0,
 			threats = #(Threat.list or {}), steps = Pilot.steps, plans = Pilot.plans, game = g and g.name or "?",
-			deaths = g and g.stats.deaths or 0, fled = g and g.stats.fled or 0, elapsed = Pilot.elapsed(),
+			deaths = g and g.stats.deaths or 0, fled = g and g.stats.fled or 0, elapsed = Pilot.elapsed(), order = Brain.Orders and Brain.Orders.summary() or "",
 		}
 	end
 
@@ -17815,7 +22112,7 @@ Smart.moodHook = function()
 end
 Smart.notify()
 
------------------------------------------------------------------- page: Keys (use up to 4 API keys together)
+------------------------------------------------------------------ page: Keys (use up to 8 API keys together)
 local refreshKeys
 do
 	local pg = newPage("Keys")
@@ -17842,7 +22139,7 @@ do
 	end
 
 	refreshKeys = function()
-		for i = 1, 4 do
+		for i = 1, MAXSLOTS do
 			local s = cfg.Slots[i]
 			cards[i].Visible = i <= cfg.SlotCount
 			infos[i].Text = infoText(i)
@@ -17851,7 +22148,7 @@ do
 			onBtns[i].Text = s.on and "On" or "Off"
 			onBtns[i].BackgroundColor3 = s.on and T.accent or T.off
 		end
-		addBtn.Visible = cfg.SlotCount < 4
+		addBtn.Visible = cfg.SlotCount < MAXSLOTS
 		local act = Keys.active()
 		for k, r in ipairs(ROLES) do
 			local idx = cfg.Roles[r[1]]
@@ -17875,9 +22172,9 @@ do
 
 	local hc = newCard(pg)
 	newHeader(hc, "API keys")
-	newLabel(hc, "Use up to 4 free keys at once. Paste a key and the script reads which company it is from, then lists that company's latest models next to the box. The lists refresh by themselves, so new models show up and dead ones disappear.", { color = T.dim, size = 11 })
+	newLabel(hc, "Use up to 8 free keys at once. Paste a key and the script reads which company it is from, then lists that company's latest models next to the box. The lists refresh by themselves, so new models show up and dead ones disappear.", { color = T.dim, size = 11 })
 
-	for i = 1, 4 do
+	for i = 1, MAXSLOTS do
 		local card = newCard(pg)
 		cards[i] = card
 		newHeader(card, "Key " .. i)
@@ -17987,7 +22284,7 @@ do
 	end
 
 	addBtn = newButton(pg, "+ Add another key", function()
-		cfg.SlotCount = math.min(4, cfg.SlotCount + 1)
+		cfg.SlotCount = math.min(MAXSLOTS, cfg.SlotCount + 1)
 		saveCfg()
 		refreshKeys()
 	end)
@@ -18004,8 +22301,8 @@ do
 			guard(function()
 				local cur = cfg.Roles[r[1]]
 				local nxt
-				for step = 1, 4 do
-					local c = (cur + step - 1) % 4 + 1
+				for step = 1, MAXSLOTS do
+					local c = (cur + step - 1) % MAXSLOTS + 1
 					if cfg.Slots[c].key ~= "" and cfg.Slots[c].provider ~= "" then
 						nxt = c
 						break
@@ -19086,7 +23383,7 @@ end
 ;(function()
 	local pg = newPage("Play")
 	local P, Check, M = Brain.Pilot, Brain.Check, World.mouse
-	local headLabel, nowLabel, goalLabel, bodyLabel, statLabel, startBtn, pauseBtn, feedLabel, checkLabel, noteBox
+	local headLabel, nowLabel, goalLabel, bodyLabel, statLabel, startBtn, pauseBtn, feedLabel, checkLabel, noteBox, ordersLabel
 	local playbookLabel, learnedLabel, skillLabel, mapLabel, gearLabel, camLabel, sightLabel
 	local pill, pillText, pillBtn, legsBtn, camBtn
 	local brainPaint
@@ -19133,6 +23430,10 @@ end
 			goalLabel.Text = (s.goal ~= "" and ("Goal: " .. s.goal) or "Goal: (none yet)") .. ((s.thought and s.thought ~= "") and ("\nThinking: " .. s.thought) or "")
 			bodyLabel.Text = (s.why and s.why ~= "") and ("Why it moves: " .. s.why) or "Why it moves: it is standing still"
 			statLabel.Text = string.format("Health %d/%d   |   threats near %d   |   plans %d, steps %d   |   deaths %d, ran away %d times", math.floor(s.hp + 0.5), math.floor(s.maxhp + 0.5), s.threats, s.plans, s.steps, s.deaths, s.fled)
+			if ordersLabel then
+				local ol = Brain.Orders and Brain.Orders.status() or {}
+				ordersLabel.Text = #ol > 0 and ("Your orders:\n" .. table.concat(ol, "\n")) or "You can give orders: go inside the house, parkour, kill the zombies, collect coins, stay here, press play, continue (free will)."
+			end
 			startBtn.Text = s.active and "Stop playing" or "Start playing"
 			startBtn.BackgroundColor3 = s.active and T.danger or T.accent
 			pauseBtn.Text = s.paused and "Resume" or "Pause"
@@ -19157,7 +23458,7 @@ end
 				local gl = Brain.Gear and Brain.Gear.summary() or {}
 				local kl = Brain.Killers and Brain.Killers.summary() or ""
 				gearLabel.Text = "Inventory (what each tool is for):\n" .. (#gl > 0 and table.concat(gl, "\n", 1, math.min(#gl, 8)) or "nothing in the backpack") .. (kl ~= "" and ("\nKill bricks: " .. kl) or "")
-				sightLabel.Text = "Sight: " .. (Brain.Vision and Brain.Vision.summary() or "off")
+				sightLabel.Text = "Sight: " .. (Brain.Vision and Brain.Vision.summary() or "off") .. (Brain.Sight and Brain.Sight.stats.looks > 0 and ("\nEyes: " .. Brain.Sight.summary()) or "")
 				camLabel.Text = "Camera: " .. (Brain.Camera and (Brain.Camera.status() .. "  (" .. Brain.Camera.summary() .. ")") or "off")
 			end
 		end
@@ -19165,7 +23466,7 @@ end
 		local camOn = cfg.AICamera ~= false
 		camBtn.Text = camOn and "CAM ON" or "CAM OFF"
 		camBtn.BackgroundColor3 = camOn and T.accent or T.off
-		pill.Visible = Core.on() and cfg.Pill ~= false and (s.active or cfg.FreeWill or cfg.AutoWalk)
+		pill.Visible = Core.on() and cfg.Pill ~= false and (s.active or cfg.FreeWill or cfg.AutoWalk) and not (M.ghostHeld and M.ghostHeld[pill])
 		if s.active then
 			pillText.Text = "Sapphire Zene  |  " .. (s.paused and "paused" or (s.goal ~= "" and s.goal or tostring(s.state)))
 			if camOn and cfg.ShowGaze ~= false and Brain.Camera and not s.paused then
@@ -19294,6 +23595,20 @@ end
 	newHeader(tc, "Tell it something (optional)")
 	newLabel(tc, "You moderate, it decides. A note is shown to it for its next few plans, for example: try the shop button, or stay out of the water.", { size = 11, color = T.dim })
 	noteBox = newBox(tc, "Say something to Sapphire Zene...", "", 44, true)
+	ordersLabel = newLabel(tc, "", { size = 11, color = T.accentText })
+	local qr = newRow(tc)
+	rowButton(qr, 3, "Parkour", function()
+		P.note("parkour")
+		refresh(true)
+	end)
+	rowButton(qr, 3, "Stay here", function()
+		P.note("stay here")
+		refresh(true)
+	end)
+	rowButton(qr, 3, "Free will", function()
+		P.note("continue")
+		refresh(true)
+	end)
 	newButton(tc, "Send", function()
 		if P.note(noteBox.Text) then
 			noteBox.Text = ""
@@ -19347,6 +23662,12 @@ end
 		cfg.Parkour = v
 		saveCfg()
 	end)
+	newToggle(lc, "Keep moving (it never stands around waiting for the AI brain: it keeps going and looks around while it thinks)", function()
+		return cfg.KeepMoving ~= false
+	end, function(v)
+		cfg.KeepMoving = v
+		saveCfg()
+	end)
 	newToggle(lc, "Sight (checks the map first: never walks at what is behind a wall, too high or across a gap)", function()
 		return cfg.Sight ~= false
 	end, function(v)
@@ -19388,6 +23709,28 @@ end
 		cfg.ShowGaze = v
 		saveCfg()
 		refresh(true)
+	end)
+	newToggle(lc, "See doorways, windows and holes (it measures walls and floors and goes in through the right gap, jumps in at a window)", function()
+		return cfg.Openings ~= false
+	end, function(v)
+		cfg.Openings = v
+		saveCfg()
+		if Brain.Sight then
+			Brain.Sight.reset()
+		end
+		if Brain.Terrain then
+			Brain.Terrain.G = nil
+		end
+	end)
+	newToggle(lc, "Show how it sees (boxes over everything: blue floors, orange walls, purple roofs, green furniture, yellow loose things, red danger, green frames = doors/windows/holes it can use, red frames = too small, red dots = edges)", function()
+		return cfg.SeeBoxes == true
+	end, function(v)
+		if Brain.Sight then
+			Brain.Sight.setShow(v)
+		else
+			cfg.SeeBoxes = v
+			saveCfg()
+		end
 	end)
 	playbookLabel = newLabel(lc, "", { size = 11, color = T.accentText })
 	learnedLabel = newLabel(lc, "", { size = 11, color = T.dim })
