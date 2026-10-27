@@ -1,5 +1,5 @@
 --[[
-	SAPPHIRE ZENE v4.4  -  an AI that plays Roblox games (built for Delta / mobile)
+	SAPPHIRE ZENE v4.5  -  an AI that plays Roblox games (built for Delta / mobile)
 
 	* Plays on its own like a real player: moves because it has a reason, runs from danger, fights,
 	  collects, talks to NPCs, presses the game's buttons with a visible cursor and tap dots
@@ -36,6 +36,17 @@
 	  and roofs, which ones a body fits through and which need a jump; goes in through a window or a hatch when there is no door
 	* v4.4 "Show how it sees" (Play tab): boxes drawn over the world, blue floors, orange walls, purple roofs, green furniture, yellow
 	  loose things, red danger, green frames = openings it can use, red frames = too small, red dots = edges
+	* v4.5 Reads like a player: signs in the world, GUIs and text on the screen, what characters say (dialogs), "Press E to continue"
+	  style hints, prices and warnings. It understands them (goals, controls, dangers, what things cost in free money) and writes
+	  each thing down once: "Learned: ..." never repeats, in this session or the next. Text its patterns cannot explain is
+	  explained by the AI, one short call, never twice for the same text. Harmless key hints on the screen are pressed for it,
+	  never anything that buys something or costs Robux. New step "read": walks up to a sign or a talking character and reads it
+	* v4.5 Sees what moves: platforms that glide, spinning bars, rolling or fast things (even ones no physics engine reports), how
+	  fast, where to and back, how long a trip takes; it knows when it stands on a moving platform, steps aside from things coming at
+	  it, and draws them pink in "Show how it sees"
+	* v4.5 Adapts like Mahoraga: remembers what worked and what hurt against each kind of enemy. Up close loses -> next time it keeps
+	  its distance (the far end of its weapon, just outside the enemy's reach); nothing works -> it stays away from that enemy.
+	  Hurt twice by the same thing becomes a rule. Everything is kept in the game file
 	* Chats when someone says its name (Sapphire Zene) or yours (warmachine12908), or everyone (Settings)
 	* Free API keys: Groq, Gemini, OpenRouter, Cerebras, NVIDIA, HuggingFace (Keys tab, up to 8)
 	* Knowledge, Triggers, Memory, Coding and Ask AI tabs, Smart mode with emotions
@@ -54,7 +65,7 @@
 local PRESET_KEYS = { "", "", "", "" } -- optional: paste up to 8 API keys here (you can also use the Keys tab)
 local CAP_CHAT, CAP_TRIGGER, CAP_SMART, CAP_ASK, CAP_WORLD = 6000, 5500, 7000, 2000, 99999999
 local DIR = "SofiAI" -- data folder name stays the same on purpose: your files never reset
-local VERSION = "4.4"
+local VERSION = "4.5"
 
 local Players = game:GetService("Players")
 local HttpService = game:GetService("HttpService")
@@ -843,6 +854,10 @@ local Default = {
 	FightBack = true,
 	Openings = true, -- it sees doorways, windows and holes in walls and floors and uses them
 	SeeBoxes = false, -- draw what it sees in the world (boxes, edges, openings)
+	Adapt = true, -- it remembers what worked and what hurt against each enemy and fights differently next time (keeps its distance, or stays away)
+	Movers = true, -- it watches what moves (platforms, spinners, rolling or fast things) and steps aside in time
+	Reader = true, -- it reads signs, screen text, dialogs and understands them (and learns what they say)
+	AutoHints = true, -- it presses the key a harmless on-screen hint asks for ("Press E to continue")
 	}
 local MAXSLOTS = 8 -- how many API keys can work together
 for i = 1, MAXSLOTS do
@@ -3585,7 +3600,7 @@ end
 
 	------------------------------------------------------------ index of sounds / prompts / seats in the map
 	local weak = { __mode = "k" }
-	local Idx = { sound = setmetatable({}, weak), prompt = setmetatable({}, weak), click = setmetatable({}, weak), seat = setmetatable({}, weak), hum = setmetatable({}, weak) }
+	local Idx = { sound = setmetatable({}, weak), prompt = setmetatable({}, weak), click = setmetatable({}, weak), seat = setmetatable({}, weak), hum = setmetatable({}, weak), sign = setmetatable({}, weak) }
 	local function reg(d)
 		if d:IsA("Sound") then
 			Idx.sound[d] = true
@@ -3597,6 +3612,8 @@ end
 			Idx.seat[d] = true
 		elseif d:IsA("Humanoid") then
 			Idx.hum[d] = true
+		elseif d:IsA("SurfaceGui") or d:IsA("BillboardGui") or d:IsA("Dialog") or d:IsA("Hint") or d:IsA("Message") then
+			Idx.sign[d] = true -- signs, name tags, what a character says (the reader looks at these)
 		end
 	end
 	World.idx = Idx
@@ -4813,7 +4830,7 @@ end
 			pcall(reg, d)
 		end))
 		track(workspace.DescendantRemoving:Connect(function(d)
-			Idx.sound[d], Idx.prompt[d], Idx.click[d], Idx.seat[d], Idx.hum[d] = nil, nil, nil, nil, nil
+			Idx.sound[d], Idx.prompt[d], Idx.click[d], Idx.seat[d], Idx.hum[d], Idx.sign[d] = nil, nil, nil, nil, nil, nil
 		end))
 	end
 	-- sensing loop (cheap when everything is off)
@@ -7848,7 +7865,7 @@ end
 	local function newKnow()
 		-- moves: what its body can do here; safe: which way of escaping worked against what; skills: what each skill does; spots: safe places it found;
 		-- acts: cause and effect it learned or was told: what pressing a button / collecting / fighting something does, and how often it worked
-		return { summary = "", objective = "", mechanics = {}, threats = {}, prey = {}, collect = {}, hazards = {}, goals = {}, tips = {}, gui = {}, acts = {}, places = {}, moves = {}, safe = {}, skills = {}, spots = {}, killers = {}, gear = {}, combat = {}, blocked = {} }
+		return { summary = "", objective = "", mechanics = {}, threats = {}, prey = {}, collect = {}, hazards = {}, goals = {}, tips = {}, gui = {}, acts = {}, places = {}, moves = {}, safe = {}, skills = {}, spots = {}, killers = {}, gear = {}, combat = {}, blocked = {}, seen = {}, prices = {}, adapt = {} }
 	end
 	local function fix(g)
 		g.name = tostring(g.name or "Game")
@@ -8610,9 +8627,19 @@ threats: things that hurt or kill the player, or that the notes say to avoid or 
 			return false -- it names another game: not a fact about this one
 		end
 		local kw = keywords(text)
+		-- "Press E to open" and "Press F to open" differ only in a one-letter word: that is not the same fact
+		local function singles(x)
+			local t = {}
+			for w in tostring(x):lower():gmatch("%f[%w]%w%f[%W]") do
+				t[#t + 1] = w
+			end
+			table.sort(t)
+			return table.concat(t)
+		end
+		local mine = singles(text)
 		for _, it in ipairs(list) do
 			local s2 = type(it) == "table" and it.m or it
-			if tostring(s2):lower() == text:lower() or jaccard(kw.set, keywords(tostring(s2)).set) > 0.65 then
+			if tostring(s2):lower() == text:lower() or (jaccard(kw.set, keywords(tostring(s2)).set) > 0.65 and singles(s2) == mine) then
 				return false
 			end
 		end
@@ -8625,6 +8652,28 @@ threats: things that hurt or kill the player, or that the notes say to avoid or 
 	end
 	function Games.tip(text)
 		return Games.addTo("tips", text, 80)
+	end
+	-- a word for dangerous ground (lava, acid...): it is looked for in the names of the parts it walks on
+	function Games.noteHazard(word)
+		local g = Games.cur()
+		if not g then
+			return false
+		end
+		word = trim(tostring(word or ""):lower():gsub("[^%a%s]", ""))
+		if #word < 3 or #word > 24 then
+			return false
+		end
+		for _, h in ipairs(g.know.hazards) do
+			if tostring(type(h) == "table" and (h.p or h.m) or h):lower() == word then
+				return false
+			end
+		end
+		g.know.hazards[#g.know.hazards + 1] = word
+		while #g.know.hazards > 30 do
+			table.remove(g.know.hazards, 1)
+		end
+		dirty = true
+		return true
 	end
 	function Games.mechanic(text)
 		return Games.addTo("mechanics", text, 50)
@@ -9375,6 +9424,16 @@ end)()
 			list[#list + 1] = t
 			byId[t.id] = t
 		end
+		-- signs and characters that talk: things it can read (ids x1, x2...)
+		if Brain.Reader and cfg.Reader ~= false then
+			local x = 0
+			for _, it in ipairs(Brain.Reader.signTargets(4)) do
+				x = x + 1
+				local t = { id = "x" .. x, kind = "sign", obj = it.obj, label = trimChars(it.text, 40), text = it.text, dist = it.dist, pos = it.pos, src = it.src }
+				list[#list + 1] = t
+				byId[t.id] = t
+			end
+		end
 		return list, byId
 	end
 
@@ -9414,7 +9473,7 @@ end)()
 			end
 			local list = Sense.targets()
 			local sc = M.x and World.screenSize and World.screenSize() or nil
-			local groups = { { "npc", "CREATURES AND CHARACTERS" }, { "prompt", "THINGS TO USE" }, { "click", "THINGS TO USE" }, { "seat", "SEATS" }, { "collect", "COLLECTIBLES" }, { "button", "BUTTONS ON SCREEN" }, { "core", "ROBLOX MENU BUTTONS" }, { "model", "OBJECTS NEARBY" }, { "player", "PLAYERS" } }
+			local groups = { { "npc", "CREATURES AND CHARACTERS" }, { "prompt", "THINGS TO USE" }, { "click", "THINGS TO USE" }, { "seat", "SEATS" }, { "collect", "COLLECTIBLES" }, { "button", "BUTTONS ON SCREEN" }, { "core", "ROBLOX MENU BUTTONS" }, { "model", "OBJECTS NEARBY" }, { "sign", "SIGNS AND TALKERS (use read)" }, { "player", "PLAYERS" } }
 			local done = {}
 			for _, gdef in ipairs(groups) do
 				local b = {}
@@ -9639,6 +9698,9 @@ end)()
 			return
 		end
 		Threat.lastCulprit = { name = cause, t = now }
+		if Brain.Adapt and cause:find("^ground:") then
+			pcall(Brain.Adapt.hurt, cause:sub(8), "ground")
+		end
 		if cause:find("^ground:") then
 			local word = cause:sub(8)
 			local have = false
@@ -10378,6 +10440,27 @@ end)()
 	end
 
 	-- fight something: get close, swing, keep going until it is down, or it is too dangerous
+	-- one step away from something, to a place with floor under it and nothing in the way (turning when the straight way back is blocked)
+	local function backOff(root, hum, from, char)
+		local away = Vector3.new(root.Position.X - from.X, 0, root.Position.Z - from.Z)
+		if away.Magnitude < 0.1 then
+			away = Vector3.new(1, 0, 0)
+		end
+		away = away.Unit
+		local rp = rparams(char)
+		for _, rot in ipairs({ 0, 0.7, -0.7, 1.4, -1.4 }) do
+			local c, s = math.cos(rot), math.sin(rot)
+			local dir = Vector3.new(away.X * c - away.Z * s, 0, away.X * s + away.Z * c)
+			local dest = root.Position + dir * 4
+			local fl, hz = floorInfo(dest, char)
+			if fl and not hz and not solid(ray(root.Position + Vector3.new(0, 0.5, 0), dir * 4.5, rp)) then
+				Legs.moveTo(hum, dest)
+				return true
+			end
+		end
+		pcall(Legs.halt, hum, root)
+		return false
+	end
 	function Body.attack(e, o)
 		o = o or {}
 		local char, root, hum = parts()
@@ -10387,6 +10470,25 @@ end)()
 		if Legs.hardOff() then
 			return "legsoff", 0, 0
 		end
+		-- what it learned about this enemy decides how it fights it: up close, from the far end of its reach, or not at all
+		local foeKey = (e.model and e.model.Name) or e.disp or e.label or e.name or "target"
+		local tactic = o.tactic
+		if not tactic then
+			tactic = "close"
+			if Brain.Adapt and not o.reckless and cfg.Adapt ~= false then
+				local at, awhy = Brain.Adapt.pick(foeKey)
+				tactic = at
+				if at ~= "close" and awhy then
+					Body.reason(("Against %s: %s"):format(foeKey, awhy))
+					Brain.Adapt.stats.changed = Brain.Adapt.stats.changed + 1
+				end
+			end
+		end
+		if tactic == "flee" then
+			Body.lastWhy = "I cannot beat it"
+			return "retreat", 0, 0
+		end
+		local hp0 = hum.Health
 		local tok = Body.newToken()
 		standUp(hum)
 		local model = e.model or e.obj
@@ -10409,6 +10511,7 @@ end)()
 		local lastSwing = 0
 		local sc = World.screenSize and World.screenSize()
 		local lastSkill = 0
+		local lastMe = hum.Health
 		while Alive and tok == Body.token and os.clock() - t0 < (o.timeout or 22) do
 			char, root, hum = parts()
 			if not (root and hum) then
@@ -10473,8 +10576,30 @@ end)()
 				end
 				routed = r ~= "none"
 			end
+			local sp
+			if tactic == "kite" and Brain.Adapt then
+				if lastMe and hum.Health < lastMe - 0.4 then
+					Brain.Adapt.reachSeen(foeKey, d) -- it hurt me from here: it reaches this far
+				end
+				sp = Brain.Adapt.spacing(foeKey)
+				if not sp then
+					Body.lastWhy = "it reaches as far as I do"
+					result = "retreat"
+					break
+				end
+			end
+			lastMe = hum.Health
 			if hold and d <= hold then
 				pcall(Legs.halt, hum, root) -- a ranged skill is doing the work from here
+			elseif sp then
+				-- the far end of my reach, just outside theirs
+				if d < sp - 0.8 then
+					backOff(root, hum, tr.Position, char)
+				elseif d > sp + 0.8 then
+					Legs.moveTo(hum, tr.Position)
+				else
+					pcall(Legs.halt, hum, root)
+				end
 			elseif not routed then
 				Legs.moveTo(hum, tr.Position)
 			end
@@ -10523,6 +10648,10 @@ end)()
 			end
 		end
 		Games.bump("fights")
+		if Brain.Adapt and not o.reckless then
+			local _, _, h3 = parts()
+			pcall(Brain.Adapt.record, foeKey, tactic, result, hp0 - (h3 and h3.Health or 0), swings)
+		end
 		if result == "defeated" then
 			pcall(function()
 				Games.notePrey(name, "defeated it", "pilot")
@@ -10765,7 +10894,13 @@ end)()
 				m[key .. "Ok"] = size
 				Games.save()
 				if size >= 3 then
-					pcall(Games.mechanic, ("I can %s about %s studs"):format(key == "up" and "jump up" or "jump across", tostring(size)))
+					-- told once (the best size so far lives in the moves record and the body text)
+					local text = ("I can %s about %s studs"):format(key == "up" and "jump up" or "jump across", tostring(size))
+					if Brain.Learn then
+						pcall(Brain.Learn.note, "mechanic", text)
+					else
+						pcall(Games.mechanic, text)
+					end
 				end
 			end
 			m[key .. "N"] = (tonumber(m[key .. "N"]) or 0) + 1
@@ -12911,6 +13046,9 @@ end)()
 			Sight.stats.crossed = Sight.stats.crossed + 1
 			local m = movesRec()
 			m.openOk = (tonumber(m.openOk) or 0) + 1
+			if Brain.Learn then
+				pcall(Brain.Learn.note, "mechanic", ("I can get through a %s in a wall or floor"):format(tostring(o.kind or "gap")))
+			end
 		else
 			Sight.stats.failed = Sight.stats.failed + 1
 			Sight.markBad(o, 45)
@@ -13057,7 +13195,7 @@ end)()
 	local COLORS = {
 		floor = Color3.fromRGB(70, 150, 255), roof = Color3.fromRGB(170, 110, 255), wall = Color3.fromRGB(255, 165, 50), pillar = Color3.fromRGB(255, 120, 190),
 		block = Color3.fromRGB(200, 200, 210), prop = Color3.fromRGB(70, 220, 120), glass = Color3.fromRGB(80, 230, 255), hazard = Color3.fromRGB(255, 60, 60),
-		ramp = Color3.fromRGB(120, 200, 255), ladder = Color3.fromRGB(240, 220, 90), ghost = Color3.fromRGB(150, 150, 150), loose = Color3.fromRGB(255, 235, 60),
+		ramp = Color3.fromRGB(120, 200, 255), ladder = Color3.fromRGB(240, 220, 90), ghost = Color3.fromRGB(150, 150, 150), loose = Color3.fromRGB(255, 235, 60), mover = Color3.fromRGB(255, 70, 255),
 	}
 	local OPEN_OK, OPEN_NO = Color3.fromRGB(60, 255, 120), Color3.fromRGB(255, 90, 90)
 	local folder, anchor
@@ -13147,7 +13285,7 @@ end)()
 				break
 			end
 			if e.role ~= "ground" and flat(e.center, root.Position) <= 55 then
-				local col = e.loose and COLORS.loose or COLORS[e.role] or COLORS.block
+				local col = (Brain.Movers and Brain.Movers.isMoving(e.part)) and COLORS.mover or e.loose and COLORS.loose or COLORS[e.role] or COLORS.block
 				adorn(e.part, nil, e.size, col, e.role == "ghost" and 0.9 or 0.72, 1)
 				nBoxes = nBoxes + 1
 			end
@@ -14038,6 +14176,14 @@ end)()
 			pcall(function()
 				ang = part.AssemblyAngularVelocity.Magnitude
 			end)
+			-- a part that a script glides or turns has no velocity in the physics engine: the movers watcher measured it
+			if Brain.Movers and not (ok and vel and (vel.Magnitude > 1.5 or ang > 0.4)) then
+				local mv = Brain.Movers.velOf(part)
+				if mv then
+					ok, vel = true, mv
+				end
+				ang = math.max(ang, Brain.Movers.spinOf(part))
+			end
 			if ok and vel and (vel.Magnitude > 1.5 or ang > 0.4) then
 				moving = true
 			end
@@ -15672,6 +15818,10 @@ end)()
 		return cfg.UseSkills ~= false and Core.on()
 	end
 	local function say(msg)
+		local lesson = msg:match("^Learned: (.+)$")
+		if lesson and Brain.Learn and not Brain.Learn.once(lesson) then
+			return -- told before (in this game, this session or an earlier one)
+		end
 		Skills.log[#Skills.log + 1] = os.date("%H:%M:%S", os.time()) .. "  " .. msg
 		while #Skills.log > 30 do
 			table.remove(Skills.log, 1)
@@ -17784,6 +17934,1667 @@ end)()
 		return "Known blocked, do not try these (they cost Robux, are locked, or did nothing): " .. table.concat(L, "; ") .. ". If money is the problem, earn more first (quests, collecting)."
 	end
 end)()
+------------------------------------------------------------------ learn: the one door for everything it finds out. A fact is stored once in the game file, never learned again,
+-- and shown in the feed as "Learned: ...". Numbers do not make a fact new ("collect 3/10 coins" is the same as "collect 4/10 coins").
+;(function()
+	local Learn = { stats = { new = 0, known = 0 }, kinds = {}, recent = {} }
+	Brain.Learn = Learn
+	local Games = Brain.Games
+
+	local function norm(s)
+		s = tostring(s or ""):lower()
+		s = s:gsub("%d[%d,%.]*", "#")
+		s = s:gsub("[^%a#%s]", " ")
+		s = s:gsub("%s+", " ")
+		return trim(s):sub(1, 90)
+	end
+	Learn.norm = norm
+	local function seenOf(g)
+		if type(g.know.seen) ~= "table" then
+			g.know.seen = {}
+		end
+		return g.know.seen
+	end
+	-- did it already learn this (in this game)?
+	function Learn.known(text)
+		local g = Games.cur(false)
+		if not g then
+			return false
+		end
+		return seenOf(g)[norm(text)] ~= nil
+	end
+
+	-- remember that something was handled (a sign that was read and understood) without storing a lesson for it
+	function Learn.mark(text)
+		local g = Games.cur()
+		if not g then
+			return false
+		end
+		local seen = seenOf(g)
+		local key = norm(text)
+		if key == "" or seen[key] then
+			return false
+		end
+		seen[key] = os.time()
+		return true
+	end
+
+	-- true the first time this lesson is told (kept across sessions), so "Learned: ..." lines never repeat
+	function Learn.once(text)
+		local g = Games.cur(false)
+		if not g then
+			return true
+		end
+		local seen = seenOf(g)
+		local key = norm("said " .. tostring(text))
+		if key == "" then
+			return true
+		end
+		if seen[key] then
+			Learn.stats.known = Learn.stats.known + 1
+			return false
+		end
+		seen[key] = os.time()
+		return true
+	end
+
+	local feedTimes = {}
+	local function say(text)
+		local P = Brain.Pilot
+		if not (P and P.say) then
+			return
+		end
+		local now = os.clock()
+		local keep = {}
+		for _, t in ipairs(feedTimes) do
+			if now - t < 20 then
+				keep[#keep + 1] = t
+			end
+		end
+		feedTimes = keep
+		if #feedTimes >= 6 then
+			return -- a burst of lessons is all stored, but the feed is not flooded
+		end
+		feedTimes[#feedTimes + 1] = now
+		P.say("Learned: " .. text)
+	end
+
+	-- kind: "mechanic" (how something works), "tip", "goal", "hazard" (a word for dangerous ground), "fact" (a lesson).
+	-- returns true when it is new. o: { quiet = true (no feed line), src = "where from" }
+	function Learn.note(kind, text, o)
+		o = o or {}
+		local g = Games.cur()
+		if not g then
+			return false
+		end
+		text = trimChars(oneLine(tostring(text or "")), 140)
+		if #text < (kind == "hazard" and 3 or 6) then
+			return false
+		end
+		if Games.mentionsOther(text) then
+			return false
+		end
+		local seen = seenOf(g)
+		local key = norm(text)
+		if key == "" then
+			return false
+		end
+		if seen[key] then
+			Learn.stats.known = Learn.stats.known + 1
+			return false
+		end
+		local stored = false
+		if kind == "mechanic" then
+			stored = Games.mechanic(text)
+		elseif kind == "goal" then
+			stored = Games.addTo("goals", text, 12)
+		elseif kind == "hazard" then
+			stored = Games.noteHazard and Games.noteHazard(text) or false
+		elseif kind == "fact" then
+			stored = pcall(World.lesson, text)
+		else
+			stored = Games.tip(text)
+		end
+		-- remembered as known even when a near-identical line was already in the file
+		seen[key] = os.time()
+		local n = 0
+		for _ in pairs(seen) do
+			n = n + 1
+		end
+		if n > 400 then
+			local oldK, oldT
+			for k2, t2 in pairs(seen) do
+				if not oldT or t2 < oldT then
+					oldK, oldT = k2, t2
+				end
+			end
+			if oldK then
+				seen[oldK] = nil
+			end
+		end
+		if stored then
+			Learn.stats.new = Learn.stats.new + 1
+			Learn.kinds[kind] = (Learn.kinds[kind] or 0) + 1
+			Learn.recent[#Learn.recent + 1] = text
+			while #Learn.recent > 12 do
+				table.remove(Learn.recent, 1)
+			end
+			if not o.quiet then
+				say(text)
+			end
+		end
+		return stored
+	end
+
+	function Learn.summary()
+		return ("learned %d new things, %d were already known"):format(Learn.stats.new, Learn.stats.known)
+	end
+end)()
+------------------------------------------------------------------ reader: it reads signs, screen text, character dialogs and key hints like a player, and understands them
+-- Sources: SurfaceGui / BillboardGui signs in the world, Dialog (NPC talk), Hint / Message, and the text on the player's screen.
+-- Understanding: patterns first (free): "Press E to open", goals, warnings, prices, round messages; the AI only for text the patterns cannot
+-- understand (one short call at a time, never twice for the same text). Everything it learns goes through Brain.Learn, so it learns it once.
+-- Key hints that the screen shows right now ("Press E to continue") are pressed by it, when the action is harmless (never Robux, never a purchase).
+;(function()
+	local Reader = { stats = { read = 0, learned = 0, pressed = 0, digested = 0 }, done = {}, queue = {}, hints = {}, items = {}, log = {}, running = false }
+	Brain.Reader = Reader
+	local Games, Learn, Body, Threat = Brain.Games, Brain.Learn, Brain.Body, Brain.Threat
+	local Idx = World.idx
+	local M = World.mouse
+	local VIMs
+	pcall(function()
+		VIMs = game:GetService("VirtualInputManager")
+	end)
+
+	local function parts()
+		local c = lp.Character
+		return c, c and c:FindFirstChild("HumanoidRootPart"), c and c:FindFirstChildOfClass("Humanoid")
+	end
+	local function r0(n)
+		return math.floor(n + 0.5)
+	end
+	local function on()
+		return cfg.Reader ~= false
+	end
+
+	------------------------------------------------------------ understanding one text
+	local KEYNAMES = { space = "Space", spacebar = "Space", shift = "Shift", ctrl = "Ctrl", control = "Ctrl", enter = "Enter", ["return"] = "Enter", tab = "Tab", esc = "Esc", escape = "Esc", mouse = "Mouse", lmb = "Mouse", rmb = "RightMouse" }
+	local function keyOf(tok)
+		tok = tostring(tok or ""):lower()
+		tok = tok:gsub("[%[%]%(%)<>]", "")
+		if #tok == 1 and tok:match("[%a%d]") then
+			return tok:upper()
+		end
+		return KEYNAMES[tok]
+	end
+	local CURRENCY = { coin = true, coins = true, cash = true, gold = true, gem = true, gems = true, money = true, points = true, crystal = true, crystals = true, token = true, tokens = true, bucks = true, orb = true, orbs = true, diamond = true, diamonds = true, studs = true, credits = true, xp = true, souls = true, shards = true }
+	local HAZARDS = { "lava", "acid", "spikes", "spike", "void", "poison", "fire", "laser", "lasers", "electric", "toxic", "magma", "saw", "bomb", "mines", "quicksand", "radiation", "flames", "traps", "trap" }
+	local WARN = { "warning", "danger", "dangerous", "beware", "avoid", "deadly", "kills", "careful", "do not touch", "don't touch", "dont touch", "keep off", "keep out", "hot ", "will hurt", "will kill", "instantly" }
+	local GOALWORDS = { "objective", "quest", "mission", "goal:", "your task", "find the ", "reach the", "defeat ", "survive", "deliver", "escape the", "bring me", "i need you", "can you help", "help me", "collect %d", "collect all", "win by", "to win", "to complete", "last one standing", "get to the" }
+	local HOWTO = { "use", "click", "tap", "walk", "touch", "step", "stand", "collect", "jump", "avoid", "talk", "find", "go", "press", "hold", "run", "climb", "swim", "mine", "chop", "equip", "drag", "bring", "give", "upgrade", "sit", "throw", "dodge", "block", "run", "fight", "defeat", "enter", "open", "pick", "grab" }
+	-- contextual actions that are harmless to do when a hint asks for them
+	local SAFEACT = { "open", "enter", "use", "interact", "talk", "continue", "skip", "start", "begin", "play", "take", "pick", "collect", "claim", "close", "next", "dismiss", "accept", "proceed", "read", "examine", "inspect", "sit", "ride", "climb", "pull", "push", "ready", "join", "loot", "search", "harvest", "mine", "chop", "fish", "plant", "water", "cook", "speak", "ok", "okay", "got it", "continue", "exit", "go" }
+	local UNSAFEACT = { "buy", "purchase", "sell", "trade", "gift", "report", "leave", "quit", "reset", "delete", "donate", "rebirth", "prestige", "subscribe", "spend", "robux", "premium", "gamepass", "vip", "$", "r$", "log out", "unlock for", "upgrade" }
+
+	local function hasWord(low, list)
+		for _, w in ipairs(list) do
+			if low:find(w, 1, true) then
+				return w
+			end
+		end
+		return nil
+	end
+	local function cleanAction(a)
+		a = tostring(a or ""):gsub("[%.!%?]+$", "")
+		a = trim(a)
+		a = a:gsub("^to%s+", "")
+		return trimChars(trim(a), 40)
+	end
+	local function safeAction(a)
+		local low = " " .. tostring(a or ""):lower() .. " "
+		if hasWord(low, UNSAFEACT) then
+			return false
+		end
+		for _, w in ipairs(SAFEACT) do
+			if low:find("%f[%a]" .. w .. "%f[%A]") then
+				return true
+			end
+		end
+		return false
+	end
+	-- the first free-currency price in a text: name, amount, unit
+	local function priceOf(low, isButton)
+		if not (isButton or low:find("cost", 1, true) or low:find("price", 1, true) or low:find("buy", 1, true) or low:find("purchase", 1, true) or low:find("unlock", 1, true) or low:find("upgrade", 1, true) or low:find("%f[%a]for%f[%A]")) then
+			return nil
+		end
+		local init = 1
+		while true do
+			local s, e, n, unit = low:find("(%d[%d,%.]*)%s*(%a+)", init)
+			if not s then
+				return nil
+			end
+			if CURRENCY[unit] then
+				local amount = tonumber((n:gsub(",", "")))
+				local before = trim(low:sub(1, s - 1):gsub("%f[%a]costs?%f[%A]", " "):gsub("%f[%a]price%f[%A]", " "):gsub("%f[%a]buy%f[%A]", " "):gsub("%f[%a]for%f[%A]", " "):gsub("%f[%a]only%f[%A]", " "):gsub("[^%a%s]", " "))
+				local words = {}
+				for w in before:gmatch("%a+") do
+					words[#words + 1] = w
+				end
+				local name = {}
+				for i = math.max(1, #words - 2), #words do
+					name[#name + 1] = words[i]
+				end
+				return { name = #name > 0 and table.concat(name, " ") or "item", n = amount, unit = unit }
+			end
+			init = e + 1
+		end
+	end
+
+	-- text -> { keys, goals, tips, hazards, mech, price, robux, any }. Pure: it only looks at the words.
+	function Reader.parse(text, o)
+		o = o or {}
+		local raw = trimChars(oneLine(tostring(text or "")), 400)
+		local low = " " .. raw:lower() .. " "
+		local r = { text = raw, keys = {}, goals = {}, tips = {}, hazards = {}, mech = {}, robux = false, any = false }
+		if #raw < 3 then
+			return r
+		end
+		local why, hard
+		if Brain.Ledger then
+			why, hard = Brain.Ledger.scan(raw)
+		end
+		if why and hard then
+			r.robux, r.why, r.any = true, why, true
+			return r
+		end
+		local words = 0
+		for _ in raw:gmatch("%S+") do
+			words = words + 1
+		end
+		if not o.button then
+			-- key hints
+			local seenKey = {}
+			local function addKey(tok, act, hold)
+				local k = keyOf(tok)
+				act = cleanAction(act)
+				if k and act ~= "" and not seenKey[k .. act] then
+					seenKey[k .. act] = true
+					r.keys[#r.keys + 1] = { key = k, does = act, hold = hold and true or false, safe = safeAction(act) }
+				end
+			end
+			for verb, tok, act in low:gmatch("%f[%a](%a+)%s+%[?([%w]+)%]?%s+to%s+([^%.!,;\n]+)") do
+				if verb == "press" or verb == "hold" or verb == "tap" or verb == "hit" then
+					addKey(tok, act, verb == "hold")
+				end
+			end
+			for tok, act in low:gmatch("%[([%w]+)%]%s*([%a][^%.!,;\n%[]*)") do
+				addKey(tok, act, false)
+			end
+			for verb, act in low:gmatch("%f[%a](%a+)%s+to%s+([^%.!,;\n]+)") do
+				if verb == "click" or verb == "tap" then
+					addKey("mouse", act, false)
+				end
+			end
+			for act in low:gmatch("press any key to%s+([^%.!,;\n]+)") do
+				r.keys[#r.keys + 1] = { key = "Any", does = cleanAction(act), hold = false, safe = safeAction(act) }
+			end
+		end
+		-- prices (free currency): shop information
+		local pr = priceOf(low, o.button)
+		if pr and pr.n and pr.n > 0 and (o.button or words > 2) then
+			r.price = pr
+		end
+		if o.button then
+			r.any = r.price ~= nil
+			return r
+		end
+		-- warnings and hazards
+		if hasWord(low, WARN) then
+			for _, h in ipairs(HAZARDS) do
+				if low:find("%f[%a]" .. h .. "%f[%A]") then
+					r.hazards[#r.hazards + 1] = h
+				end
+			end
+			if #r.hazards > 0 or words >= 3 then
+				r.tips[#r.tips + 1] = "Warning: " .. trimChars(raw, 120)
+			end
+		end
+		-- goals
+		if words >= 3 then
+			for _, w in ipairs(GOALWORDS) do
+				if low:find(w, 1, true) or (w:find("%%") and low:find(w)) then
+					r.goals[#r.goals + 1] = trimChars(raw, 100)
+					break
+				end
+			end
+		end
+		-- the game's rhythm
+		if low:find("intermission", 1, true) or low:find("waiting for players", 1, true) or (low:find("round", 1, true) and (low:find("start", 1, true) or low:find("begin", 1, true) or low:find("ends in", 1, true) or low:find("next round", 1, true))) then
+			r.mech[#r.mech + 1] = "The game is played in rounds, with waiting time between them"
+		end
+		if low:find("you won", 1, true) or low:find("winner", 1, true) or low:find("victory", 1, true) then
+			r.mech[#r.mech + 1] = "A round ends with a winner"
+		end
+		if low:find("eliminated", 1, true) or low:find("game over", 1, true) then
+			r.mech[#r.mech + 1] = "Dying or being eliminated takes you out of the round"
+		end
+		-- instructions ("Use the lever to open the gate")
+		if #r.keys == 0 and #r.goals == 0 and #r.tips == 0 and words >= 4 and words <= 28 then
+			for _, v in ipairs(HOWTO) do
+				if low:find("^%s*" .. v .. "%f[%A]") or low:find("%f[%a]to " .. v .. "%f[%A]") then
+					r.tips[#r.tips + 1] = trimChars(raw, 120)
+					break
+				end
+			end
+		end
+		r.any = (#r.keys + #r.goals + #r.tips + #r.hazards + #r.mech) > 0 or r.price ~= nil
+		return r
+	end
+
+	------------------------------------------------------------ learning from it (stored once, shown as "Learned:")
+	local function keyLine(k)
+		if k.key == "Mouse" then
+			return "Click to " .. k.does
+		elseif k.key == "Any" then
+			return "Press any key to " .. k.does
+		end
+		return ("%s %s to %s"):format(k.hold and "Hold" or "Press", k.key, k.does)
+	end
+	local function savePrice(pr)
+		local g = Games.cur()
+		if not g then
+			return false
+		end
+		if type(g.know.prices) ~= "table" then
+			g.know.prices = {}
+		end
+		local key = pr.name:sub(1, 24)
+		local old = g.know.prices[key]
+		if old and old.n == pr.n and old.unit == pr.unit then
+			return false
+		end
+		g.know.prices[key] = { n = pr.n, unit = pr.unit, t = os.time() }
+		local c = 0
+		for _ in pairs(g.know.prices) do
+			c = c + 1
+		end
+		if c > 40 then
+			local ok, ot
+			for k2, v in pairs(g.know.prices) do
+				if k2 ~= key and (not ot or (v.t or 0) < ot) then
+					ok, ot = k2, v.t or 0
+				end
+			end
+			if ok then
+				g.know.prices[ok] = nil
+			end
+		end
+		return true
+	end
+	-- uses a parsed text: returns how many new things it learned
+	function Reader.learnFrom(r, o)
+		o = o or {}
+		local n = 0
+		local function got(kind, text, q)
+			if Learn.note(kind, text, { quiet = q }) then
+				n = n + 1
+			end
+		end
+		if r.robux then
+			if not o.button then
+				got("fact", ("%s: it costs Robux, never buy it"):format(trimChars(r.text, 60)))
+			end
+		else
+			for _, k in ipairs(r.keys) do
+				got("mechanic", keyLine(k))
+				Reader.hints[k.key .. ":" .. Learn.norm(k.does)] = { key = k.key, does = k.does, safe = k.safe, hold = k.hold }
+			end
+			for _, w in ipairs(r.hazards) do
+				got("hazard", w, true)
+			end
+			for _, g2 in ipairs(r.goals) do
+				got("goal", g2)
+			end
+			for _, m in ipairs(r.mech) do
+				got("mechanic", m)
+			end
+			for _, t in ipairs(r.tips) do
+				got("tip", t)
+			end
+			if r.price and savePrice(r.price) then
+				n = n + 1
+				got("mechanic", ("%s costs %s %s"):format(r.price.name, r.price.n, r.price.unit), true)
+			end
+		end
+		Reader.stats.learned = Reader.stats.learned + n
+		return n
+	end
+
+	------------------------------------------------------------ the AI for text the patterns cannot understand
+	local DIGEST_SYS = 'You read text that a Roblox player sees in a game (signs, dialogs, messages). Say what it means for a player. Reply with ONLY JSON: {"tips":["short rule"],"goals":["short goal"],"hazards":["one word for dangerous ground"],"keys":[{"key":"E","does":"short action"}],"costs_robux":false}. Only what the text really says, at most 3 tips, empty lists when there is nothing useful.'
+	local lastDigest = -99
+	function Reader.digest(items, force)
+		-- returns how many new things it learned, and whether the AI was asked at all (when it was not, the texts wait for a calmer moment)
+		if #items == 0 or not (Keys and #Keys.active() > 0) then
+			return 0, false
+		end
+		if Keys.free and not Keys.free("world") then
+			return 0, false
+		end
+		if not force and Keys.pressure and Keys.pressure() >= 2 then
+			return 0, false
+		end
+		if os.clock() - lastDigest < (force and 6 or 45) then
+			return 0, false
+		end
+		lastDigest = os.clock()
+		local L = {}
+		for i, it in ipairs(items) do
+			if i <= 5 then
+				L[#L + 1] = ("%d) %s (%s)"):format(i, trimChars(it.text, 220), it.src)
+			end
+		end
+		local text = askRaw(DIGEST_SYS, "Game: " .. tostring(Games.cur(false) and Games.cur(false).name or "?") .. "\nTexts:\n" .. table.concat(L, "\n"), 300, "world")
+		Reader.stats.digested = Reader.stats.digested + 1
+		for i, it in ipairs(items) do
+			if i <= 5 then
+				Learn.mark("digested " .. it.text)
+			end
+		end
+		local raw = text and text:match("%b{}")
+		local d = raw and jdecode(raw)
+		if type(d) ~= "table" then
+			return 0, true
+		end
+		local n = 0
+		local function got(kind, t2, q)
+			if Learn.note(kind, t2, { quiet = q }) then
+				n = n + 1
+			end
+		end
+		if d.costs_robux == true then
+			got("fact", ("%s: it costs Robux, never buy it"):format(trimChars(items[1].text, 60)))
+		end
+		for i, t2 in ipairs(type(d.tips) == "table" and d.tips or {}) do
+			if i <= 3 and type(t2) == "string" then
+				got("tip", t2)
+			end
+		end
+		for i, t2 in ipairs(type(d.goals) == "table" and d.goals or {}) do
+			if i <= 2 and type(t2) == "string" then
+				got("goal", t2)
+			end
+		end
+		for i, t2 in ipairs(type(d.hazards) == "table" and d.hazards or {}) do
+			if i <= 3 and type(t2) == "string" then
+				got("hazard", t2, true)
+			end
+		end
+		for i, k in ipairs(type(d.keys) == "table" and d.keys or {}) do
+			if i <= 3 and type(k) == "table" then
+				local key, does = keyOf(k.key), cleanAction(k.does)
+				if key and does ~= "" then
+					local kk = { key = key, does = does, hold = false, safe = safeAction(does) }
+					got("mechanic", keyLine(kk))
+					Reader.hints[key .. ":" .. Learn.norm(does)] = kk
+				end
+			end
+		end
+		Reader.stats.learned = Reader.stats.learned + n
+		return n, true
+	end
+
+	------------------------------------------------------------ what there is to read
+	local SKIP_GUI = { "chat", "playerlist", "leaderboard", "bubble", "emote", "backpack", "topbar", "nametag", "healthbar", "proximityprompts", "freecam" }
+	local function guiPos(inst)
+		local base = inst.Parent
+		local ad
+		pcall(function()
+			ad = inst.Adornee
+		end)
+		if ad then
+			base = ad
+		end
+		if not base then
+			return nil
+		end
+		local ok, v = pcall(function()
+			if base:IsA("BasePart") then
+				return base.Position
+			end
+			if base:IsA("Attachment") then
+				return base.WorldPosition
+			end
+			if base:IsA("Model") then
+				return base:GetPivot().Position
+			end
+			return nil
+		end)
+		return ok and v or nil
+	end
+	local function guiTexts(inst)
+		local out = {}
+		local n = 0
+		for _, d in ipairs(inst:GetDescendants()) do
+			n = n + 1
+			if n > 60 then
+				break
+			end
+			if (d:IsA("TextLabel") or d:IsA("TextButton")) and d.Visible ~= false then
+				local t = trim(oneLine(tostring(d.Text or "")))
+				if #t >= 2 then
+					out[#out + 1] = t
+				end
+			end
+		end
+		return table.concat(out, " / ")
+	end
+	local function dialogText(d)
+		local t = trim(oneLine(tostring(d.InitialPrompt or "")))
+		local ch = {}
+		for _, c in ipairs(d:GetChildren()) do
+			if c:IsA("DialogChoice") then
+				local u = trim(oneLine(tostring(c.UserDialog or "")))
+				local rr = trim(oneLine(tostring(c.ResponseDialog or "")))
+				if u ~= "" then
+					ch[#ch + 1] = u .. (rr ~= "" and (" -> " .. rr) or "")
+				end
+			end
+		end
+		if #ch > 0 then
+			t = t .. (t ~= "" and " | " or "") .. table.concat(ch, " | ")
+		end
+		return t
+	end
+	local function insideCreature(inst)
+		local m = inst:FindFirstAncestorOfClass("Model")
+		return m and m:FindFirstChildOfClass("Humanoid") ~= nil
+	end
+
+	-- everything that can be read around (signs and dialogs, with their distance) and on the screen
+	function Reader.gather(maxAge)
+		if Reader.cache and os.clock() - Reader.cache.t <= (maxAge or 2) then
+			return Reader.cache.list
+		end
+		local out = {}
+		local _, root = parts()
+		local me = root and root.Position
+		pcall(function()
+			for inst in pairs(Idx.sign) do
+				if inst.Parent and not World.isOwn(inst) then
+					local text, src, pos
+					if inst:IsA("Dialog") then
+						text, src = dialogText(inst), "dialog"
+						pos = guiPos(inst)
+					elseif inst:IsA("Hint") or inst:IsA("Message") then
+						text, src = trim(oneLine(tostring(inst.Text or ""))), "message"
+					elseif (inst:IsA("SurfaceGui") or inst:IsA("BillboardGui")) and inst.Enabled ~= false and not insideCreature(inst) then
+						text, src = guiTexts(inst), "sign"
+						pos = guiPos(inst)
+					end
+					if text and #text >= 3 then
+						local d = (pos and me) and (pos - me).Magnitude or 0
+						if src == "message" or d <= 70 then
+							out[#out + 1] = { src = src, text = text, obj = inst, pos = pos, dist = d }
+						end
+					end
+				end
+			end
+		end)
+		table.sort(out, function(a, b)
+			if a.dist ~= b.dist then
+				return a.dist < b.dist
+			end
+			return a.text < b.text
+		end)
+		local sc = {}
+		pcall(function()
+			for _, it in ipairs(World.screen(60)) do
+				if it.kind == "text" or it.kind == "button" then
+					local sg = it.obj and it.obj:FindFirstAncestorOfClass("ScreenGui")
+					local nm = sg and sg.Name:lower() or ""
+					local skip = false
+					for _, w in ipairs(SKIP_GUI) do
+						if nm:find(w, 1, true) then
+							skip = true
+						end
+					end
+					if not skip then
+						sc[#sc + 1] = { src = "screen", button = it.kind == "button", text = it.text, obj = it.obj, dist = 0, x = it.x, y = it.y }
+					end
+				end
+			end
+		end)
+		local list = {}
+		for _, v in ipairs(out) do
+			list[#list + 1] = v
+		end
+		for _, v in ipairs(sc) do
+			list[#list + 1] = v
+		end
+		Reader.cache = { t = os.clock(), list = list }
+		return list
+	end
+
+	-- the signs and dialogs near it as targets for the planner (ids x1, x2...)
+	function Reader.signTargets(max)
+		local out = {}
+		for _, it in ipairs(Reader.gather(2)) do
+			if it.src == "sign" or it.src == "dialog" then
+				out[#out + 1] = it
+				if #out >= (max or 5) then
+					break
+				end
+			end
+		end
+		return out
+	end
+
+	------------------------------------------------------------ reading
+	local function itemKey(it)
+		return it.src .. ":" .. Learn.norm(it.text)
+	end
+	-- understand one item. force: also ask the AI right now when the patterns do not understand it
+	function Reader.absorb(it, force)
+		local key = itemKey(it)
+		if Reader.done[key] and not force then
+			return 0, false
+		end
+		local first = not Reader.done[key]
+		Reader.done[key] = os.clock()
+		if first then
+			Reader.stats.read = Reader.stats.read + 1
+		end
+		local r = Reader.parse(it.text, { button = it.button })
+		local n = Reader.learnFrom(r, { button = it.button })
+		local understood = r.any
+		if not understood and (it.src == "sign" or it.src == "dialog") and not it.button then
+			local words = 0
+			for _ in it.text:gmatch("%S+") do
+				words = words + 1
+			end
+			if words >= 4 and not Learn.known("digested " .. it.text) then
+				if force then
+					local dn, ran = Reader.digest({ it }, true)
+					n = n + dn
+					if ran then
+						understood = true
+					else
+						Reader.queue[#Reader.queue + 1] = it -- the AI is busy: it asks when it can
+					end
+				else
+					Reader.queue[#Reader.queue + 1] = it
+					while #Reader.queue > 6 do
+						table.remove(Reader.queue, 1)
+					end
+				end
+			end
+		end
+		return n, understood
+	end
+
+	local function say(text)
+		if Brain.Pilot and Brain.Pilot.say then
+			Brain.Pilot.say(text)
+		end
+		Reader.log[#Reader.log + 1] = text
+		while #Reader.log > 10 do
+			table.remove(Reader.log, 1)
+		end
+	end
+
+	------------------------------------------------------------ pressing the key a hint on the screen asks for
+	local DIGITS = { ["0"] = "Zero", ["1"] = "One", ["2"] = "Two", ["3"] = "Three", ["4"] = "Four", ["5"] = "Five", ["6"] = "Six", ["7"] = "Seven", ["8"] = "Eight", ["9"] = "Nine" }
+	local function pressKey(k, hold)
+		local name = k == "Space" and "Space" or DIGITS[k] or k
+		local ok = pcall(function()
+			local code = Enum.KeyCode[name]
+			if not (VIMs and code) then
+				error("no key")
+			end
+			VIMs:SendKeyEvent(true, code, false, game)
+			task.wait(hold and 1.3 or 0.12)
+			VIMs:SendKeyEvent(false, code, false, game)
+		end)
+		return ok
+	end
+	Reader.pressKey = pressKey
+	local PRESSABLE = function(k)
+		return #k == 1 or k == "Space"
+	end
+	-- a prompt close by that costs Robux: no key is pressed while it is there
+	local function riskyPromptNear(me)
+		if not me then
+			return false
+		end
+		local bad = false
+		pcall(function()
+			for p in pairs(Idx.prompt) do
+				if p.Parent and p.Enabled ~= false then
+					local par = p.Parent
+					local pos = par:IsA("BasePart") and par.Position or (par:IsA("Attachment") and par.WorldPosition) or nil
+					if pos and (pos - me).Magnitude <= (p.MaxActivationDistance or 10) + 4 then
+						local t = tostring(p.ActionText or "") .. " " .. tostring(p.ObjectText or "") .. " " .. tostring(par.Name)
+						if Brain.Ledger then
+							local why, hard = Brain.Ledger.scan(t)
+							if why and hard then
+								bad = true
+							end
+						end
+					end
+				end
+			end
+		end)
+		return bad
+	end
+	local lastPress, pressLog = -99, {}
+	function Reader.autoPress(list)
+		if cfg.AutoHints == false or not on() then
+			Reader.why = "switched off"
+			return false
+		end
+		local P = Brain.Pilot
+		if not (P and P.active) or P.paused or (Core.Legs and Core.Legs.yielding and Core.Legs.yielding()) then
+			Reader.why = "not playing or steered by the owner"
+			return false
+		end
+		if Body and Body.fleeing then
+			Reader.why = "fleeing"
+			return false
+		end
+		if os.clock() - lastPress < 3 then
+			return false
+		end
+		local _, root, hum = parts()
+		if not (root and hum) or hum.Health <= 0 then
+			return false
+		end
+		for _, it in ipairs(list) do
+			if it.src == "screen" and not it.button then
+				local r = Reader.parse(it.text)
+				for _, k in ipairs(r.keys) do
+					local bad = (M.riskyText and (M.riskyText(it.text) or M.riskyText(k.does))) or (M.autoRiskyText and M.autoRiskyText(k.does))
+					if not k.safe or not PRESSABLE(k.key) then
+						Reader.why = "not a harmless key: " .. k.key .. " " .. k.does
+					elseif bad then
+						Reader.why = "risky: " .. k.does
+					else
+						local hk = k.key .. ":" .. Learn.norm(k.does)
+						local rec = pressLog[hk] or { n = 0, t = -99, first = os.clock() }
+						if os.clock() - rec.first > 120 then
+							rec = { n = 0, t = -99, first = os.clock() }
+						end
+						local blocked = Brain.Ledger and Brain.Ledger.isBlocked("hint:" .. hk)
+						if blocked then
+							Reader.why = "blocked: " .. hk
+						elseif os.clock() - rec.t < 8 or rec.n >= 4 then
+							Reader.why = "pressed enough: " .. hk
+						elseif riskyPromptNear(root.Position) then
+							Reader.why = "a Robux prompt is close"
+						else
+							rec.n, rec.t = rec.n + 1, os.clock()
+							pressLog[hk] = rec
+							lastPress = os.clock()
+							if pressKey(k.key, k.hold) then
+								Reader.stats.pressed = Reader.stats.pressed + 1
+								say(("Pressed %s to %s (the screen asked for it)"):format(k.key, k.does))
+								if rec.n >= 3 and Brain.Ledger then
+									Brain.Ledger.block("hint:" .. hk, "pressing it does not change anything", false)
+								end
+								return true
+							end
+							Reader.why = "the key could not be pressed"
+						end
+					end
+				end
+			end
+		end
+		return false
+	end
+
+	------------------------------------------------------------ the loop
+	function Reader.tick()
+		if not on() then
+			return
+		end
+		local list = Reader.gather(0)
+		local _, root = parts()
+		local me = root and root.Position
+		for _, it in ipairs(list) do
+			-- what it can see from where it stands is read on its own; farther signs are read by walking up (the read step)
+			local near = it.src == "screen" or it.src == "message" or (it.dist <= 40 and (not it.pos or not me or not Brain.Vision or Brain.Vision.straight(me, it.pos, it.obj and it.obj.Parent)))
+			if near then
+				Reader.absorb(it, false)
+			end
+		end
+		pcall(Reader.autoPress, list)
+		if #Reader.queue > 0 then
+			local batch = {}
+			for _, it in ipairs(Reader.queue) do
+				if not Learn.known("digested " .. it.text) then
+					batch[#batch + 1] = it
+				end
+			end
+			Reader.queue = batch
+			if #batch > 0 then
+				local _, ran = Reader.digest(batch, false)
+				if ran then
+					Reader.queue = {}
+				end
+			end
+		end
+	end
+	function Reader.start()
+		if Reader.running then
+			return
+		end
+		Reader.running = true
+		task.spawn(function()
+			while Alive and Brain.Pilot and Brain.Pilot.active do
+				pcall(Reader.tick)
+				task.wait(2.5)
+			end
+			Reader.running = false
+		end)
+	end
+
+	-- the read step: walk up to a sign or a character that talks, read all of it, understand it
+	function Reader.readStep(t, why)
+		local item
+		for _, it in ipairs(Reader.gather(0)) do
+			if t and t.obj and it.obj == t.obj then
+				item = it
+				break
+			end
+		end
+		if not item and t and t.kind == "sign" and t.text then
+			item = { src = "sign", text = t.text, obj = t.obj, pos = t.pos, dist = t.dist or 0 }
+		end
+		if not item and not t then
+			-- no target: the nearest thing that was not read yet, else what is on the screen
+			for _, it in ipairs(Reader.gather(0)) do
+				if (it.src == "sign" or it.src == "dialog") and not Reader.done[itemKey(it)] then
+					item = it
+					break
+				end
+			end
+		end
+		if not item then
+			local screen = {}
+			for _, it in ipairs(Reader.gather(0)) do
+				if it.src == "screen" and not it.button and #it.text >= 6 then
+					screen[#screen + 1] = trimChars(it.text, 50)
+					Reader.absorb(it, true)
+					if #screen >= 4 then
+						break
+					end
+				end
+			end
+			if #screen == 0 then
+				return "there is nothing to read here", "fail"
+			end
+			return "read the screen: " .. table.concat(screen, " | "), "ok"
+		end
+		if item.pos and Body then
+			local _, root = parts()
+			if root and (item.pos - root.Position).Magnitude > 9 then
+				local res = Body.goto(item.pos, { label = "the " .. item.src, why = why, within = 7, timeout = 16 })
+				if res == "unreachable" then
+					return "cannot get close enough to read it: " .. tostring(Body.lastWhy or "blocked"), "fail"
+				elseif res ~= "arrived" then
+					return "could not get to the " .. item.src .. " (" .. res .. ")", (res == "threat" or res == "interrupted" or res == "dead" or res == "legsoff" or res == "yield") and "stop" or "fail"
+				end
+			end
+			if Brain.Camera and Brain.Camera.face then
+				pcall(Brain.Camera.face, item.pos, "reading the " .. item.src, 0.8)
+			end
+		end
+		-- the text may have changed while walking
+		local fresh = item.obj and item.obj.Parent and (item.src == "dialog" and dialogText(item.obj) or (item.src == "sign" and guiTexts(item.obj))) or item.text
+		if fresh and #fresh >= 2 then
+			item.text = fresh
+		end
+		local n, understood = Reader.absorb(item, true)
+		local shown = trimChars(item.text, 70)
+		if n > 0 then
+			return ('read the %s "%s" and learned %d new thing%s from it'):format(item.src, shown, n, n == 1 and "" or "s"), "ok"
+		elseif understood then
+			return ('read the %s "%s": I already knew all of it'):format(item.src, shown), "ok"
+		end
+		return ('read the %s "%s": nothing useful in it'):format(item.src, shown), "ok"
+	end
+
+	------------------------------------------------------------ for the planner
+	function Reader.text()
+		if not on() then
+			return ""
+		end
+		local L = {}
+		local _, root = parts()
+		local me = root and root.Position
+		local near = {}
+		for _, it in ipairs(Reader.gather(2)) do
+			if (it.src == "sign" or it.src == "dialog") and #near < 4 then
+				near[#near + 1] = ('%s "%s" (%d studs%s)'):format(it.src, trimChars(it.text, 80), r0(it.dist or 0), Reader.done[itemKey(it)] and "" or ", not read yet: use read")
+			end
+		end
+		if #near > 0 then
+			L[#L + 1] = "READABLE NEARBY: " .. table.concat(near, "; ")
+		end
+		local hs = {}
+		for _, it in ipairs(Reader.gather(2)) do
+			if it.src == "screen" and not it.button then
+				local r = Reader.parse(it.text)
+				for _, k in ipairs(r.keys) do
+					if #hs < 3 then
+						hs[#hs + 1] = keyLine(k)
+					end
+				end
+			end
+		end
+		if #hs > 0 then
+			L[#L + 1] = "KEY HINTS ON SCREEN: " .. table.concat(hs, "; ") .. (cfg.AutoHints ~= false and " (harmless ones are pressed for you)" or "")
+		end
+		local rec = {}
+		for i = math.max(1, #Learn.recent - 2), #Learn.recent do
+			rec[#rec + 1] = Learn.recent[i]
+		end
+		if #rec > 0 then
+			L[#L + 1] = "Just learned from reading: " .. table.concat(rec, "; ")
+		end
+		local g = Games.cur(false)
+		if g and type(g.know.prices) == "table" then
+			local pb = {}
+			for k, v in pairs(g.know.prices) do
+				if #pb < 4 then
+					pb[#pb + 1] = ("%s %d %s"):format(k, v.n, v.unit)
+				end
+			end
+			table.sort(pb)
+			if #pb > 0 then
+				L[#L + 1] = "Prices you read: " .. table.concat(pb, ", ") .. " (only ever pay with free in-game money, never Robux)"
+			end
+		end
+		return table.concat(L, "\n")
+	end
+	function Reader.summary()
+		return ("read %d texts, learned %d things, pressed %d key hints"):format(Reader.stats.read, Reader.stats.learned, Reader.stats.pressed)
+	end
+	function Reader.reset()
+		Reader.done, Reader.queue, Reader.hints, Reader.cache = {}, {}, {}, nil
+		lastDigest, lastPress, pressLog = -99, -99, {}
+	end
+end)()
+------------------------------------------------------------------ movers: it sees what moves. Platforms that glide back and forth, spinning bars, rolling or loose things, fast things coming at it.
+-- Anchored parts that a script moves have no velocity in the physics engine, so it watches where every part near it IS, a few times a second, and works out how it moves:
+-- speed, direction, where it goes to and back from, how long a trip takes, whether it spins. That feeds the planner, the dodge reflex of the kill-brick guard, and the "how it sees" overlay.
+;(function()
+	local Movers = { list = {}, stats = { tracked = 0, moving = 0, spinners = 0, dodged = 0 }, rec = setmetatable({}, { __mode = "k" }), log = {} }
+	Brain.Movers = Movers
+	local Sight, Body, Games, Learn = Brain.Sight, Brain.Body, Brain.Games, Brain.Learn
+	local Legs = Core.Legs
+
+	local MAXTRACK = 90
+	local RADIUS = 60
+	local function on()
+		return cfg.Movers ~= false and Sight ~= nil
+	end
+	local function parts()
+		local c = lp.Character
+		return c, c and c:FindFirstChild("HumanoidRootPart"), c and c:FindFirstChildOfClass("Humanoid")
+	end
+	local function flat(a, b)
+		return math.sqrt((a.X - b.X) ^ 2 + (a.Z - b.Z) ^ 2)
+	end
+	local function angleBetween(a, b)
+		local d = math.clamp(a:Dot(b), -1, 1)
+		return math.deg(math.acos(d))
+	end
+
+	-- one look at one part: where it is now, compared with the last look
+	local function observe(e, now)
+		local p = e.part
+		local ok, pos, cf = pcall(function()
+			return p.Position, p.CFrame
+		end)
+		if not ok or not pos then
+			return nil
+		end
+		local r = Movers.rec[p]
+		if not r then
+			r = { part = p, name = p.Name, pos = pos, t = now, vel = Vector3.new(0, 0, 0), speed = 0, spin = 0, min = pos, max = pos, moves = 0, still = 0, flips = {}, first = now, e = e }
+			pcall(function()
+				r.look, r.right, r.up = cf.LookVector, cf.RightVector, cf.UpVector
+			end)
+			Movers.rec[p] = r
+			return r
+		end
+		r.e = e
+		local dt = now - r.t
+		if dt < 0.3 then
+			return r
+		end
+		local v = (pos - r.pos) / dt
+		local old = r.vel
+		r.vel = Vector3.new(old.X * 0.4 + v.X * 0.6, old.Y * 0.4 + v.Y * 0.6, old.Z * 0.4 + v.Z * 0.6)
+		r.speed = r.vel.Magnitude
+		-- how fast it turns
+		local spin = 0
+		pcall(function()
+			local l, ri, u = cf.LookVector, cf.RightVector, cf.UpVector
+			if r.look then
+				spin = math.max(angleBetween(l, r.look), angleBetween(ri, r.right or ri), angleBetween(u, r.up or u)) / dt
+			end
+			r.look, r.right, r.up = l, ri, u
+		end)
+		r.spin = r.spin * 0.4 + spin * 0.6
+		-- where it has been
+		r.min = Vector3.new(math.min(r.min.X, pos.X), math.min(r.min.Y, pos.Y), math.min(r.min.Z, pos.Z))
+		r.max = Vector3.new(math.max(r.max.X, pos.X), math.max(r.max.Y, pos.Y), math.max(r.max.Z, pos.Z))
+		if v.Magnitude > 0.7 then
+			r.moves = r.moves + 1
+			r.still = 0
+			r.lastMove = now
+			-- the direction it goes turns around at the ends of its way: that gives the time of a whole trip
+			local axis = math.abs(r.vel.X) >= math.abs(r.vel.Z) and "X" or "Z"
+			if math.abs(r.vel.Y) > math.abs(r.vel.X) and math.abs(r.vel.Y) > math.abs(r.vel.Z) then
+				axis = "Y"
+			end
+			local s = r.vel[axis]
+			if r.sign and s ~= 0 and (s > 0) ~= (r.sign > 0) and math.abs(s) > 0.5 then
+				r.flips[#r.flips + 1] = now
+				while #r.flips > 6 do
+					table.remove(r.flips, 1)
+				end
+			end
+			if math.abs(s) > 0.5 then
+				r.sign, r.axis = s, axis
+			end
+		else
+			r.still = r.still + dt
+		end
+		r.pos, r.t = pos, now
+		return r
+	end
+
+	-- is it moving right now? (it also counts a part that paused at the end of its way a moment ago)
+	function Movers.isMoving(part)
+		local r = Movers.rec[part]
+		if not r then
+			return false
+		end
+		if r.spinOk then
+			return true
+		end
+		return (r.speed > 0.8 and r.moves >= 2) or (r.lastMove ~= nil and os.clock() - r.lastMove < 1.5 and r.moves >= 2)
+	end
+	function Movers.velOf(part)
+		local r = Movers.rec[part]
+		if r and r.speed > 0.8 and r.moves >= 2 then
+			return r.vel
+		end
+		return nil
+	end
+	function Movers.spinOf(part)
+		local r = Movers.rec[part]
+		if r and r.spin > 25 then
+			return math.rad(r.spin)
+		end
+		return 0
+	end
+	-- a trip from one end to the other and back, in seconds (0 when it has not been seen twice at the end)
+	local function period(r)
+		if #r.flips >= 3 then
+			local sum, n = 0, 0
+			for i = 2, #r.flips do
+				sum, n = sum + (r.flips[i] - r.flips[i - 1]), n + 1
+			end
+			return (sum / n) * 2
+		end
+		return 0
+	end
+
+	local function kindOf(r)
+		local e = r.e
+		local size = e and e.size or r.part.Size
+		local big = math.max(size.X, size.Y, size.Z)
+		-- kill bricks have their own dodge (the kill-brick guard); this one is for everything else that is dangerous and moves
+		local killer = false
+		if Brain.Killers and Brain.Killers.matches and cfg.LearnKillers ~= false then
+			local okk, m = pcall(Brain.Killers.matches, r.part)
+			killer = okk and m and true or false
+		end
+		local danger = killer
+		if e and e.role == "hazard" then
+			danger = true
+		end
+		local loose = e and e.loose
+		r.killer = killer
+		local kind
+		if r.speed > 0.8 and r.moves >= 2 then
+			if loose and big < 3 and r.speed > 18 then
+				kind = "projectile"
+				danger = true
+			elseif loose then
+				kind = "loose"
+				if r.speed > 12 and big >= 2 then
+					danger = true
+				end
+			elseif e and (e.role == "floor" or e.role == "block" or e.role == "prop") and e.solid and e.tilt and e.tilt > 0.95 and size.X * size.Z >= 6 and not danger then
+				kind = "platform"
+			else
+				kind = "mover"
+			end
+		elseif r.spin > 25 then
+			kind = "spinner"
+			danger = danger or (e and e.solid) and big >= 6 or danger
+		end
+		return kind, danger
+	end
+
+	------------------------------------------------------------ the watching loop
+	function Movers.sample()
+		if not on() then
+			return
+		end
+		local _, root = parts()
+		if not root then
+			return
+		end
+		local now = os.clock()
+		local boxes = Sight.look(false) or {}
+		local seen = {}
+		local n = 0
+		for _, e in ipairs(boxes) do
+			if n >= MAXTRACK then
+				break
+			end
+			if e.part and e.part.Parent and e.role ~= "ground" and flat(e.center, root.Position) <= RADIUS then
+				n = n + 1
+				local r = observe(e, now)
+				if r then
+					seen[#seen + 1] = r
+				end
+			end
+		end
+		local out = {}
+		local moving = 0
+		for _, r in ipairs(seen) do
+			if r.part.Parent then
+				-- a spin is only believed after a few looks in a row
+				if r.spin > 25 then
+					r.spinN = (r.spinN or 0) + 1
+					r.spinOk = r.spinN >= 3
+				else
+					r.spinN, r.spinOk = 0, false
+				end
+				local kind, danger = kindOf(r)
+				if kind and (kind ~= "spinner" or r.spinOk) then
+					r.kind, r.danger = kind, danger
+					r.dist = flat(r.pos, root.Position)
+					r.period = period(r)
+					out[#out + 1] = r
+					if kind ~= "spinner" then
+						moving = moving + 1
+					end
+				else
+					r.kind = nil
+				end
+			end
+		end
+		table.sort(out, function(a, b)
+			if (a.danger and 1 or 0) ~= (b.danger and 1 or 0) then
+				return a.danger
+			end
+			return a.dist < b.dist
+		end)
+		Movers.list = out
+		Movers.stats.tracked, Movers.stats.moving = #seen, moving
+		-- what it found out about how this game moves things, written down once ("Learned:")
+		for _, r in ipairs(out) do
+			if Learn and r.kind == "platform" and #r.flips >= 2 then
+				Learn.note("mechanic", ("A %s (%s) moves back and forth, about %d seconds for a whole trip: wait for it to come close, then step on"):format(r.kind, r.name, math.max(1, math.floor(r.period + 0.5))), {})
+			elseif Learn and r.kind == "spinner" and r.danger then
+				Learn.note("mechanic", ("%s spins and hurts: do not stand near it"):format(r.name), {})
+			end
+		end
+	end
+
+	------------------------------------------------------------ what is coming at it
+	-- the nearest dangerous mover that will pass through the body in the next `horizon` seconds: { r, t, away }
+	function Movers.incoming(horizon)
+		local _, root = parts()
+		if not root then
+			return nil
+		end
+		horizon = horizon or 1.2
+		local best
+		for _, r in ipairs(Movers.list) do
+			if r.danger and not r.killer and r.part.Parent and (r.kind ~= "spinner") then
+				local rel = Vector3.new(r.pos.X - root.Position.X, 0, r.pos.Z - root.Position.Z)
+				local v = Vector3.new(r.vel.X, 0, r.vel.Z)
+				local vv = v:Dot(v)
+				local t = vv > 0.01 and math.clamp(-rel:Dot(v) / vv, 0, horizon) or 0
+				local at = rel + v * t
+				local size = r.e and r.e.size or r.part.Size
+				local reach = math.max(size.X, size.Z) / 2 + 1.6
+				-- same height as the body, roughly
+				local top, bot = r.pos.Y + size.Y / 2, r.pos.Y - size.Y / 2
+				local feet = root.Position.Y - 3
+				if at.Magnitude < reach and top > feet - 0.5 and bot < feet + 5 then
+					if not best or t < best.t then
+						best = { r = r, t = t, rel = rel, v = v }
+					end
+				end
+			end
+		end
+		return best
+	end
+	local lastDodge = 0
+	function Movers.guard()
+		if not on() or not Legs.can() then
+			return
+		end
+		if not ((Brain.Pilot and Brain.Pilot.active) or cfg.FreeWill or cfg.AutoPlay) then
+			return
+		end
+		local _, root, hum = parts()
+		if not (root and hum) or hum.Health <= 0 then
+			return
+		end
+		local now = os.clock()
+		if now - lastDodge < 0.5 then
+			return
+		end
+		local inc = Movers.incoming(1.2)
+		if not inc then
+			return
+		end
+		lastDodge = now
+		Movers.stats.dodged = Movers.stats.dodged + 1
+		-- step across its way, to the side that is away from it
+		local v = inc.v
+		local dir
+		if v.Magnitude > 0.5 then
+			local side = Vector3.new(-v.Z, 0, v.X).Unit
+			local toMe = Vector3.new(-inc.rel.X, 0, -inc.rel.Z)
+			dir = (side:Dot(toMe) >= 0) and side or -side
+		else
+			dir = Vector3.new(-inc.rel.X, 0, -inc.rel.Z)
+			dir = dir.Magnitude > 0.1 and dir.Unit or Vector3.new(1, 0, 0)
+		end
+		Legs.moveTo(hum, root.Position + dir * 8)
+		if Body and Body.reason then
+			Body.reason(("Stepping aside, %s is coming at me (%d studs/s)"):format(tostring(inc.r.name), math.floor(inc.v.Magnitude + 0.5)))
+		end
+	end
+
+	------------------------------------------------------------ what it stands on
+	-- the moving platform under its feet, if there is one
+	function Movers.under()
+		local _, root, hum = parts()
+		if not (root and hum) then
+			return nil
+		end
+		local feet = root.Position.Y - 3
+		for _, r in ipairs(Movers.list) do
+			if r.kind == "platform" and r.part.Parent then
+				local size = r.e and r.e.size or r.part.Size
+				local top = r.pos.Y + size.Y / 2
+				if math.abs(top - feet) < 1.6 and math.abs(root.Position.X - r.pos.X) <= size.X / 2 + 0.5 and math.abs(root.Position.Z - r.pos.Z) <= size.Z / 2 + 0.5 then
+					return r
+				end
+			end
+		end
+		return nil
+	end
+
+	local function dirName(v)
+		local ax, ay, az = math.abs(v.X), math.abs(v.Y), math.abs(v.Z)
+		if ay > ax and ay > az then
+			return v.Y > 0 and "up" or "down"
+		end
+		if ax >= az then
+			return v.X > 0 and "east" or "west"
+		end
+		return v.Z > 0 and "south" or "north"
+	end
+
+	function Movers.text()
+		if not on() then
+			return ""
+		end
+		local L = {}
+		local under = Movers.under()
+		if under then
+			L[#L + 1] = ("YOU ARE ON the moving platform %s (going %s at %.0f studs/s%s): stay on it until it is next to where you want to go, then step off"):format(under.name, dirName(under.vel), under.speed, under.period > 0 and (", a whole trip takes about " .. math.floor(under.period + 0.5) .. " s") or "")
+		end
+		local shown = 0
+		for _, r in ipairs(Movers.list) do
+			if shown >= 4 then
+				break
+			end
+			if r ~= under then
+				shown = shown + 1
+				local bit
+				local size = r.e and r.e.size or r.part.Size
+				if r.kind == "platform" then
+					local ext = ""
+					if #r.flips >= 1 then
+						local axis = r.axis or "X"
+						ext = (" between %s %d and %d"):format(axis == "Y" and "height" or axis, math.floor(r.min[axis] + 0.5), math.floor(r.max[axis] + 0.5))
+					end
+					bit = ('platform "%s" %.0fx%.0f at (%d,%d), moving %s at %.0f studs/s%s%s: you can ride it, step on when it is close'):format(r.name, size.X, size.Z, math.floor(r.pos.X), math.floor(r.pos.Z), dirName(r.vel), r.speed, ext, r.period > 0 and (", about " .. math.floor(r.period + 0.5) .. " s per trip") or "")
+				elseif r.kind == "spinner" then
+					bit = ('"%s" spinning%s (keep %d studs away)'):format(r.name, r.danger and ", dangerous" or "", math.floor(math.max(size.X, size.Z) / 2 + 3))
+				elseif r.kind == "projectile" then
+					bit = ('fast small thing "%s" going %s at %.0f studs/s, dangerous, step aside'):format(r.name, dirName(r.vel), r.speed)
+				elseif r.kind == "loose" then
+					bit = ('loose "%s" %.0fx%.0f rolling %s at %.0f studs/s%s'):format(r.name, size.X, size.Z, dirName(r.vel), r.speed, r.danger and ", dangerous" or "")
+				else
+					bit = ('"%s" moving %s at %.0f studs/s%s'):format(r.name, dirName(r.vel), r.speed, r.danger and ", dangerous" or "")
+				end
+				L[#L + 1] = bit
+			end
+		end
+		if #L == 0 then
+			return ""
+		end
+		return "MOVING THINGS: " .. table.concat(L, "; ")
+	end
+	function Movers.summary()
+		local plat, spin, dng = 0, 0, 0
+		for _, r in ipairs(Movers.list) do
+			if r.kind == "platform" then
+				plat = plat + 1
+			elseif r.kind == "spinner" then
+				spin = spin + 1
+			end
+			if r.danger then
+				dng = dng + 1
+			end
+		end
+		return ("%d parts watched, %d moving (%d platforms, %d spinners, %d dangerous), %d dodges"):format(Movers.stats.tracked, Movers.stats.moving, plat, spin, dng, Movers.stats.dodged)
+	end
+	function Movers.reset()
+		Movers.rec = setmetatable({}, { __mode = "k" })
+		Movers.list = {}
+	end
+
+	task.spawn(function()
+		while Alive do
+			task.wait(0.4)
+			if on() and (Brain.Pilot and Brain.Pilot.active or cfg.FreeWill or cfg.AutoPlay or cfg.SeeBoxes) then
+				pcall(Movers.sample)
+			end
+		end
+	end)
+	task.spawn(function()
+		while Alive do
+			task.wait(0.15)
+			pcall(Movers.guard)
+		end
+	end)
+end)()
+------------------------------------------------------------------ adapt: it remembers what worked and what hurt, against what, and changes how it fights. It does not make the same mistake twice.
+-- Per enemy kind it keeps the result of every fight by tactic: "close" (walk up and swing), "kite" (stay at the far end of my weapon's reach, just outside theirs),
+-- and what the fight cost. The next fight uses the tactic that worked; a tactic that lost is not repeated while another one is untried; when everything lost it stays away.
+-- Every conclusion is told once ("Learned: ...") and kept in the game file, so a new session starts with it.
+;(function()
+	local Adapt = { stats = { picks = 0, changed = 0, avoided = 0 }, log = {} }
+	Brain.Adapt = Adapt
+	local Games, Learn = Brain.Games, Brain.Learn
+
+	local function on()
+		return cfg.Adapt ~= false
+	end
+	local function kn()
+		local g = Games.cur()
+		if not g then
+			return { foes = {}, hurt = {} }
+		end
+		local a = g.know.adapt
+		if type(a) ~= "table" then
+			a = {}
+			g.know.adapt = a
+		end
+		for _, k in ipairs({ "foes", "hurt" }) do
+			if type(a[k]) ~= "table" then
+				a[k] = {}
+			end
+		end
+		return a
+	end
+	local function foe(name, create)
+		name = tostring(name or ""):lower()
+		if name == "" then
+			return nil
+		end
+		local a = kn()
+		local f = a.foes[name]
+		if not f and create then
+			f = { close = { n = 0, w = 0, l = 0, dmg = 0 }, kite = { n = 0, w = 0, l = 0, dmg = 0 }, t = os.time() }
+			a.foes[name] = f
+			local n, oldest, ok = 0, nil, nil
+			for k, v in pairs(a.foes) do
+				n = n + 1
+				if k ~= name and (not oldest or (v.t or 0) < oldest) then
+					oldest, ok = v.t or 0, k
+				end
+			end
+			if n > 40 and ok then
+				a.foes[ok] = nil
+			end
+		end
+		return f
+	end
+
+	-- how far away it can stand and still hit, against how far this enemy reaches
+	local function weaponRange()
+		local C = Brain.Combat
+		local tool = C and C.weaponReady and C.weaponReady() or nil
+		if not tool then
+			local c = lp.Character
+			tool = c and c:FindFirstChildOfClass("Tool")
+		end
+		if tool and Brain.Gear and Brain.Gear.rangeOf then
+			return Brain.Gear.rangeOf(tool) or 6.5
+		end
+		return nil
+	end
+	local function reachOf(name)
+		local C = Brain.Combat
+		local r = C and C.foe and C.foe(name)
+		if r and r.reach and r.reach > 0 then
+			return r.reach
+		end
+		return nil
+	end
+	-- the distance it should keep: just outside their reach, inside mine. nil when there is no such distance (they reach as far as I do)
+	function Adapt.spacing(name)
+		local range = weaponRange()
+		if not range then
+			return nil
+		end
+		-- what it saw it hit from is only the least it reaches: it assumes at least a melee reach (about 5 studs) and grows the guess when it is hit from farther
+		local reach = math.max(reachOf(name) or 0, 5.0)
+		local want = math.min(range - 0.5, reach + 1.5)
+		if want < reach + 0.8 then
+			return nil
+		end
+		return want
+	end
+	function Adapt.canKite(name)
+		return Adapt.spacing(name) ~= nil
+	end
+	-- somebody hurt it while it kept its distance: they reach farther than thought
+	function Adapt.reachSeen(name, d)
+		local C = Brain.Combat
+		local r = C and C.foe and C.foe(name, true)
+		if r and d and d > 0 and d < 40 and d > (r.reach or 0) then
+			r.reach = d
+		end
+	end
+
+	-- which tactic to use against this enemy: tactic, why
+	function Adapt.pick(name)
+		if not on() then
+			return "close", nil
+		end
+		Adapt.stats.picks = Adapt.stats.picks + 1
+		local f = foe(name, false)
+		local c = f and f.close or { n = 0, w = 0, l = 0 }
+		local k = f and f.kite or { n = 0, w = 0, l = 0 }
+		local C = Brain.Combat
+		local cr = C and C.foe and C.foe(name)
+		local hurts = cr and (cr.hits or 0) >= 3
+		local canKite = Adapt.canKite(name)
+		if k.w > 0 and k.w > k.l and canKite then
+			return "kite", "keeping my distance worked against it"
+		end
+		if c.w > 0 and c.l * 2 <= c.w then
+			return "close", "fighting it up close worked"
+		end
+		if canKite and k.l < 2 and (c.l >= 1 or (hurts and c.w == 0)) then
+			return "kite", c.l >= 1 and "up close it beat me, so I keep my distance" or "it hurts up close, so I keep my distance"
+		end
+		if c.l >= 2 and c.w == 0 and (not canKite or k.l >= 2) then
+			return "flee", ("I lost to it %d times and nothing I tried worked"):format(c.l + k.l)
+		end
+		return "close", nil
+	end
+	function Adapt.avoid(name)
+		if not on() then
+			return false
+		end
+		local t, why = Adapt.pick(name)
+		Adapt.stats.picks = Adapt.stats.picks - 1
+		return t == "flee", why
+	end
+
+	-- the result of one fight
+	-- res: "defeated" | "dead" | "retreat" | other (nothing decided); lost: health it lost in the fight
+	function Adapt.record(name, tactic, res, lost, swings)
+		if not on() or not name or name == "" or tactic == "flee" then
+			return
+		end
+		local win = res == "defeated"
+		local lose = res == "dead" or res == "retreat"
+		if not (win or lose) then
+			return
+		end
+		local f = foe(name, true)
+		local t = f[tactic] or f.close
+		t.n = t.n + 1
+		t.dmg = (t.dmg or 0) + math.max(0, lost or 0)
+		if win then
+			t.w = t.w + 1
+		else
+			t.l = t.l + 1
+		end
+		f.t = os.time()
+		Games.save()
+		local nm = tostring(name)
+		local line
+		if tactic == "close" and lose and t.l == 1 then
+			line = ("Fighting %s up close went badly, next time I try something else"):format(nm)
+		elseif tactic == "close" and win and t.w == 1 then
+			line = ("I can beat %s by walking up and swinging"):format(nm)
+		elseif tactic == "kite" and win and t.w == 1 then
+			line = ("Keeping my distance from %s works: I hit it from the far end of my reach, outside its reach"):format(nm)
+		elseif tactic == "kite" and lose and t.l == 1 then
+			line = ("Keeping my distance from %s did not save me"):format(nm)
+		end
+		if line then
+			Adapt.log[#Adapt.log + 1] = line
+			while #Adapt.log > 10 do
+				table.remove(Adapt.log, 1)
+			end
+			if Learn then
+				Learn.note("tip", line)
+			end
+		end
+		local again, why = Adapt.pick(nm)
+		if again == "flee" and Learn then
+			Adapt.stats.avoided = Adapt.stats.avoided + 1
+			Learn.note("tip", ("%s beats me every way I tried: I stay away from it"):format(nm))
+		end
+	end
+
+	-- hurt by something that is not a creature (a moving bar, a fall, a hazard): it keeps count, the second time it is a rule
+	function Adapt.hurt(source, kind)
+		if not source or source == "" then
+			return
+		end
+		local a = kn()
+		local key = tostring(source):lower():sub(1, 30)
+		local h = a.hurt[key]
+		if not h then
+			h = { n = 0, kind = kind or "?", t = os.time() }
+			a.hurt[key] = h
+			local n, oldest, ok = 0, nil, nil
+			for k2, v in pairs(a.hurt) do
+				n = n + 1
+				if k2 ~= key and (not oldest or (v.t or 0) < oldest) then
+					oldest, ok = v.t or 0, k2
+				end
+			end
+			if n > 30 and ok then
+				a.hurt[ok] = nil
+			end
+		end
+		h.n = h.n + 1
+		h.t = os.time()
+		if h.n == 2 and Learn then
+			local line
+			if kind == "mover" then
+				line = ("%s hurt me twice: it moves, so I step aside earlier and cross when it is far"):format(source)
+			elseif kind == "fall" then
+				line = ("Falling from %s hurt me twice: I only drop from lower places there"):format(source)
+			else
+				line = ("%s hurt me twice: I keep away from it"):format(source)
+			end
+			Learn.note("tip", line)
+		end
+	end
+
+	function Adapt.text()
+		if not on() then
+			return ""
+		end
+		local a = kn()
+		local rows = {}
+		for name, f in pairs(a.foes) do
+			local t, why = Adapt.pick(name)
+			Adapt.stats.picks = Adapt.stats.picks - 1
+			if t ~= "close" or (f.close.n + f.kite.n) > 0 then
+				rows[#rows + 1] = { name = name, t = f.t or 0, tactic = t, why = why }
+			end
+		end
+		table.sort(rows, function(x, y)
+			return x.t > y.t
+		end)
+		local L = {}
+		for i = 1, math.min(3, #rows) do
+			local r = rows[i]
+			local what = r.tactic == "kite" and "keep your distance (stand at the far end of your weapon's reach)" or (r.tactic == "flee" and "stay away, you cannot win" or "walk up and fight")
+			L[#L + 1] = ("%s: %s%s"):format(r.name, what, r.why and (" (" .. r.why .. ")") or "")
+		end
+		if #L == 0 then
+			return ""
+		end
+		return "WHAT YOU LEARNED ABOUT FIGHTING (from your own fights): " .. table.concat(L, "; ")
+	end
+	function Adapt.summary()
+		local fights, wins, loses = 0, 0, 0
+		for _, f in pairs(kn().foes) do
+			for _, t in ipairs({ f.close, f.kite }) do
+				fights, wins, loses = fights + t.n, wins + t.w, loses + t.l
+			end
+		end
+		return ("%d fights remembered (%d won, %d lost), %d times it changed tactic, %d enemies it stays away from"):format(fights, wins, loses, Adapt.stats.changed, Adapt.stats.avoided)
+	end
+end)()
 ------------------------------------------------------------------ combat: the numbers behind fight-or-flee, reloading, and finding a weapon that is free
 -- It learns, per kind of enemy, how hard it hits and how much health it has, and per weapon how much damage one swing does to it.
 -- With that it works out: how long until the enemy is down (ttk), how long until I am (ttd), how many enemies are close, and decides
@@ -17810,6 +19621,11 @@ end)()
 		return cfg.Combat ~= false and Core.on()
 	end
 	local function say(key, msg, gap)
+		-- a lesson is told once, ever (the numbers in it change, the lesson does not)
+		local lesson = msg:match("^Learned: (.+)$")
+		if lesson and Brain.Learn and not Brain.Learn.once(lesson) then
+			return
+		end
 		local now = os.clock()
 		if Combat.lastSay[key] and now - Combat.lastSay[key] < (gap or 40) then
 			return
@@ -17981,6 +19797,10 @@ end)()
 			r.hp = th.MaxHealth
 		end
 		Combat.lastHurt = { name = tostring(name):lower(), model = model, t = now, dist = dist or 0 }
+		-- how far away it hurt me from: its reach (used to keep just outside it)
+		if dist and dist > 0.5 and dist < 30 and dist > (r.reach or 0) then
+			r.reach = dist
+		end
 		if r.hits == 3 then
 			local per = r.dmg / r.hits
 			say("hit:" .. tostring(name), ("Learned: %s hits for about %d"):format(tostring(name), math.floor(per + 0.5)), 600)
@@ -18079,6 +19899,14 @@ end)()
 		if #grp == 0 then
 			out.verdict, out.why = "ignore", "nothing hostile close"
 			return out
+		end
+		-- it lost to this kind every way it tried: it does not try again
+		if mainName and Brain.Adapt and cfg.Adapt ~= false then
+			local av, awhy = Brain.Adapt.avoid(mainName)
+			if av then
+				out.verdict, out.why = "flee", awhy
+				return out
+			end
 		end
 		local per, rate
 		if tool then
@@ -19916,6 +21744,11 @@ end)()
 		local alias = { walk = "goto", ["go"] = "goto", moveto = "goto", travel = "goto", use = "use", talk = "interact", open = "interact", fight = "attack", kill = "attack", grab = "collect", pickup = "collect", run = "flee", escape = "flee", tap = "click", press = "click", wander = "explore", search = "explore", chat = "say" }
 		d = alias[d] or d
 		local t = findTarget(st.target)
+		if t and t.kind == "sign" and (d == "interact" or d == "click" or d == "use" or d == "goto" or d == "examine" or d == "look" or d == "inspect") then
+			d = "read" -- a sign or a talking character is read, not clicked
+		elseif d == "examine" or d == "look" or d == "inspect" or d == "study" then
+			d = "read"
+		end
 		local char, root, hum = parts()
 		if not (root and hum) then
 			return "no character yet", "stop"
@@ -20110,6 +21943,12 @@ end)()
 			stopFollow()
 			Body.now = ""
 			return "followed " .. p.Name .. " for a while", "ok"
+		elseif d == "read" then
+			if not Brain.Reader or cfg.Reader == false then
+				return "reading is switched off", "fail"
+			end
+			local res, status = Brain.Reader.readStep(t, why)
+			return res, status
 		elseif d == "wait" then
 			local s2 = math.clamp(tonumber(st.seconds) or 2, 0.3, 8)
 			local t0 = os.clock()
@@ -20164,11 +22003,12 @@ How you play:
 - Use the game's own buttons and menus with the cursor when the game needs them (start, shops, quests, upgrades). Close a window when you are done with it.
 - PLAYBOOK lines (ids pb1, pb2...) are things your own game file says to do that are possible right now: do them, they are what you learned. Do not ignore what you learned.
 - Things marked "(cannot reach: ...)" or listed under CANNOT REACH are behind a wall, too high or across a gap: never plan goto, collect or attack on them, pick something else or explore.
+- Read signs, dialogs and the text on the screen: they tell you the goal, the controls and what is dangerous. What you read is saved once, so do not read the same thing again.
 - Never repeat something that did nothing twice. Do not stand around for long. Be bold and curious.
 - Chat: almost never. Use "say" only when you have something specific and new to say about what just happened (rare, most plans have no say). Never greet or say hello, never repeat or reword a message you already sent, and only words to type, no labels.
 Reply with ONLY a JSON object:
 {"thought":"one short sentence","goal":"short goal","steps":[{"do":"goto","target":"p1","why":"short"}],"learned":["short lesson"],"emotion":"excited"}
-Steps ("do"): skill (name of one of your SKILLS), goto (target id, or x and z, or place name), interact (target id: walk up and use a prompt, clicker, seat or character), click (target id of a screen button, or x and y as fractions 0 to 1 of the screen), attack (target id of a creature), collect (target id, or "what":"coin"), flee, explore, follow (target id of a player, seconds), equip (name of a tool, or "for":"weapon" / "light" / "key" / "pickaxe"), use (use the tool you hold), jump, key (one letter or Space), say (text), getweapon (go and pick up a weapon that is lying around for free, never one that costs Robux), reload (reload the gun you hold), wait (seconds).
+Steps ("do"): skill (name of one of your SKILLS), goto (target id, or x and z, or place name), interact (target id: walk up and use a prompt, clicker, seat or character), click (target id of a screen button, or x and y as fractions 0 to 1 of the screen), attack (target id of a creature), collect (target id, or "what":"coin"), flee, explore, follow (target id of a player, seconds), equip (name of a tool, or "for":"weapon" / "light" / "key" / "pickaxe"), use (use the tool you hold), jump, key (one letter or Space), say (text), getweapon (go and pick up a weapon that is lying around for free, never one that costs Robux), reload (reload the gun you hold), read (target id of a sign or talking character, x1, x2...: walk up and read it; with no target it reads the screen), wait (seconds).
 Give 1 to 4 steps. Use ids exactly as listed (g1, p2, n1, k1...). If nothing is worth doing, explore.
 OWNER ORDERS (if listed) are commands from your owner: they come before your own goals. Carry them out with your steps and add "order_done":true to your reply when they are finished.
 You think while your body keeps moving. A click, skill, equip, key or say step that has "with":"walk" is done by your hands WHILE your legs carry out the other steps (tap a menu button while running to a place).]]
@@ -20224,8 +22064,16 @@ You think while your body keeps moving. A click, skill, equip, key or say step t
 			return { thought = "my legs are off, so I watch and use the screen", goal = Pilot.goal ~= "" and Pilot.goal or "watch and learn", steps = steps, learned = {} }
 		end
 		local list = Sense.targets()
+		if Brain.Reader and cfg.Reader ~= false then
+			for _, t in ipairs(list) do
+				if t.kind == "sign" and (t.dist or 99) < 45 and not Brain.Reader.done[t.src .. ":" .. Brain.Learn.norm(t.text)] then
+					steps[#steps + 1] = { ["do"] = "read", target = t.id, why = "there is something to read here" }
+					break
+				end
+			end
+		end
 		for _, t in ipairs(list) do
-			if t.kind == "npc" and t.e and not Threat.classify(t.e) and Games.matchList(Games.preyList(), t.e.set) and t.dist < 60 and (not Brain.Vision or Brain.Vision.ok(t.pos)) then
+			if #steps == 0 and t.kind == "npc" and t.e and not Threat.classify(t.e) and Games.matchList(Games.preyList(), t.e.set) and t.dist < 60 and (not Brain.Vision or Brain.Vision.ok(t.pos)) then
 				steps[#steps + 1] = { ["do"] = "attack", target = t.id, why = "the game file says this is worth fighting" }
 				break
 			end
@@ -20323,6 +22171,18 @@ You think while your body keeps moving. A click, skill, equip, key or say step t
 		local sgt = Brain.Sight and Brain.Sight.text() or ""
 		if sgt ~= "" then
 			L[#L + 1] = sgt
+		end
+		local adt = Brain.Adapt and Brain.Adapt.text() or ""
+		if adt ~= "" then
+			L[#L + 1] = adt
+		end
+		local mvt = Brain.Movers and Brain.Movers.text() or ""
+		if mvt ~= "" then
+			L[#L + 1] = mvt
+		end
+		local rdt = Brain.Reader and Brain.Reader.text() or ""
+		if rdt ~= "" then
+			L[#L + 1] = rdt
 		end
 		local vist = Brain.Vision and Brain.Vision.text() or ""
 		if vist ~= "" then
@@ -20438,7 +22298,9 @@ You think while your body keeps moving. A click, skill, equip, key or say step t
 				if other then
 					feed("(Not saved: that lesson is about another game, " .. other .. ")")
 				else
-					if Games.tip(l) then
+					if Brain.Learn then
+						Brain.Learn.note("tip", l)
+					elseif Games.tip(l) then
 						feed("Learned: " .. l)
 					end
 					pcall(World.lesson, l)
@@ -20803,6 +22665,9 @@ You think while your body keeps moving. A click, skill, equip, key or say step t
 			end)
 		end
 		Pilot.ready, Pilot.planDoneAt, Pilot.running, Pilot.stayUntil = nil, 0, false, 0
+		if Brain.Reader then
+			Brain.Reader.start()
+		end
 		task.spawn(loop)
 		task.spawn(plannerLoop)
 		changed()
@@ -23458,7 +25323,7 @@ end
 				local gl = Brain.Gear and Brain.Gear.summary() or {}
 				local kl = Brain.Killers and Brain.Killers.summary() or ""
 				gearLabel.Text = "Inventory (what each tool is for):\n" .. (#gl > 0 and table.concat(gl, "\n", 1, math.min(#gl, 8)) or "nothing in the backpack") .. (kl ~= "" and ("\nKill bricks: " .. kl) or "")
-				sightLabel.Text = "Sight: " .. (Brain.Vision and Brain.Vision.summary() or "off") .. (Brain.Sight and Brain.Sight.stats.looks > 0 and ("\nEyes: " .. Brain.Sight.summary()) or "")
+				sightLabel.Text = "Sight: " .. (Brain.Vision and Brain.Vision.summary() or "off") .. (Brain.Sight and Brain.Sight.stats.looks > 0 and ("\nEyes: " .. Brain.Sight.summary()) or "") .. (Brain.Adapt and Brain.Adapt.stats.picks > 0 and ("\nFighting: " .. Brain.Adapt.summary()) or "") .. (Brain.Movers and Brain.Movers.stats.moving > 0 and ("\nMoving: " .. Brain.Movers.summary()) or "") .. (Brain.Reader and Brain.Reader.stats.read > 0 and ("\nReading: " .. Brain.Reader.summary()) or "")
 				camLabel.Text = "Camera: " .. (Brain.Camera and (Brain.Camera.status() .. "  (" .. Brain.Camera.summary() .. ")") or "off")
 			end
 		end
@@ -23722,7 +25587,22 @@ end
 			Brain.Terrain.G = nil
 		end
 	end)
-	newToggle(lc, "Show how it sees (boxes over everything: blue floors, orange walls, purple roofs, green furniture, yellow loose things, red danger, green frames = doors/windows/holes it can use, red frames = too small, red dots = edges)", function()
+	newToggle(lc, "Adapt to enemies (it remembers what worked and what hurt against each kind, keeps its distance when up close loses, and stays away from what it cannot beat)", function()
+		return cfg.Adapt ~= false
+	end, function(v)
+		cfg.Adapt = v
+		saveCfg()
+	end)
+	newToggle(lc, "See what moves (platforms that glide, spinning bars, rolling or fast things: it works out their path and steps aside in time)", function()
+		return cfg.Movers ~= false
+	end, function(v)
+		cfg.Movers = v
+		saveCfg()
+		if Brain.Movers then
+			Brain.Movers.reset()
+		end
+	end)
+	newToggle(lc, "Show how it sees (boxes over everything: blue floors, orange walls, purple roofs, green furniture, yellow loose things, pink moving things, red danger, green frames = doors/windows/holes it can use, red frames = too small, red dots = edges)", function()
 		return cfg.SeeBoxes == true
 	end, function(v)
 		if Brain.Sight then
@@ -23731,6 +25611,21 @@ end
 			cfg.SeeBoxes = v
 			saveCfg()
 		end
+	end)
+	newToggle(lc, "Read signs, GUIs, dialogs and screen text (it understands them and learns what they say, once)", function()
+		return cfg.Reader ~= false
+	end, function(v)
+		cfg.Reader = v
+		saveCfg()
+		if Brain.Reader then
+			Brain.Reader.reset()
+		end
+	end)
+	newToggle(lc, "Press key hints (\"Press E to continue\": it presses the key when it is harmless, never anything that costs Robux or buys something)", function()
+		return cfg.AutoHints ~= false
+	end, function(v)
+		cfg.AutoHints = v
+		saveCfg()
 	end)
 	playbookLabel = newLabel(lc, "", { size = 11, color = T.accentText })
 	learnedLabel = newLabel(lc, "", { size = 11, color = T.dim })
